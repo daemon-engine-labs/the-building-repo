@@ -1,0 +1,25 @@
+# Egress allowlist for the SANDBOX runner. tinyproxy FilterDefaultDeny=Yes means
+# everything NOT matching a line here is BLOCKED. Lines are extended regexes matched
+# against the destination host. Anchored so a substring can't widen the match.
+#
+# Keep this tight. Every host added is attack surface the agent can reach.
+
+# ── GitHub: required or the runner cannot register / run / push ──
+(^|\.)github\.com$
+(^|\.)githubusercontent\.com$
+(^|\.)actions\.githubusercontent\.com$
+codeload\.github\.com$
+api\.github\.com$
+
+# ── Model APIs (the whole point) ──
+api\.anthropic\.com$
+api\.openai\.com$
+(^|\.)chatgpt\.com$
+generativelanguage\.googleapis\.com$
+(^|\.)googleapis\.com$
+
+# ── Package registries a build may legitimately need (tighten per-project later) ──
+registry\.npmjs\.org$
+(^|\.)npmjs\.org$
+pypi\.org$
+files\.pythonhosted\.org$
