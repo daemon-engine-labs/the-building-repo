@@ -1,0 +1,5 @@
+{
+  "_comment": "Declared tool surface this agent may use. Enforced via the CLI's own permission config at invocation; this file is the source of truth an agent edits (by PR) to request more.",
+  "allow": ["read", "write", "edit", "bash", "git"],
+  "deny": ["secrets", "deploy", "publish", "spend"]
+}

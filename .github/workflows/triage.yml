@@ -1,0 +1,75 @@
+name: triage
+
+# Issue-driven entry point. NOTE: `on: issues` always runs the workflow file from the default
+# branch (main) with the repo's own context — issues carry no code, so there is no fork-RCE risk
+# here (that risk is specific to pull_request from forks, handled in a separate workflow).
+
+on:
+  issues:
+    types: [opened, labeled]
+
+# Default-deny token. The gate needs nothing but to read the repo and comment.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # ── GATE ──────────────────────────────────────────────────────────────────────
+  # Runs on the SANDBOX runner (no secrets). Decides trusted vs untrusted from the
+  # actor login — a value set by GitHub, never parsed from attacker-authored issue text.
+  gate:
+    runs-on: [self-hosted, sandbox]
+    outputs:
+      trusted: ${{ steps.check.outputs.trusted }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          # Quoted into an env var, never interpolated into the shell — no script injection.
+          ACTOR: ${{ github.event.issue.user.login }}
+        run: |
+          if grep -qxF -- "$ACTOR" allowlist.txt; then
+            echo "actor '$ACTOR' is ALLOWLISTED → privileged path"
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "actor '$ACTOR' is NOT allowlisted → propose-only path"
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── UNTRUSTED: propose-only ─────────────────────────────────────────────────────
+  # Zero-secret sandbox runner. Can only open a PR. We assert here that the secrets
+  # context is empty — this is the proof we run BEFORE wiring any real secret.
+  build-sandbox:
+    needs: gate
+    if: needs.gate.outputs.trusted == 'false'
+    runs-on: [self-hosted, sandbox]
+    steps:
+      - uses: actions/checkout@v4
+      - name: prove isolation (no secrets reachable)
+        env:
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          # On the sandbox runner this object must contain only GITHUB_TOKEN (or be empty).
+          # If a real provider secret ever appears here, the isolation is broken — fail loud.
+          echo "secrets visible to this job: $SECRETS_JSON"
+          if echo "$SECRETS_JSON" | grep -qiE 'OAUTH|ANTHROPIC|OPENAI|GEMINI|CARD|BUDGET'; then
+            echo "::error::privileged secret leaked into the sandbox path"
+            exit 1
+          fi
+      # TODO(after gate proven): run the arena in propose mode, then open a PR.
+      # - run: AGENT=claude MODE=propose ISSUE_TITLE="${{ github.event.issue.title }}" node arena/run.mjs
+      #   (issue title/body passed via env, never interpolated into a shell string)
+
+  # ── TRUSTED: privileged build ───────────────────────────────────────────────────
+  # Separate runner that holds secrets. Gated by the allowlist AND by an environment
+  # with protection rules. Inert until a privileged runner + secrets are deliberately added.
+  build-privileged:
+    needs: gate
+    if: needs.gate.outputs.trusted == 'true'
+    runs-on: [self-hosted, privileged]
+    environment: privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: placeholder
+        run: echo "privileged path reached for an allowlisted actor (no secrets wired yet)"
+      # TODO(after gate proven + secrets added): run the arena with real tokens via env, open a PR.

@@ -1,0 +1,28 @@
+{
+  "_comment": "How the arena drives each rival CLI. The agent loop is the CLI's job; we just invoke it. {persona} and {prompt} are substituted at runtime. personaArg/promptArg control how each is passed (flag vs positional/stdin).",
+  "agents": {
+    "claude": {
+      "cmd": "claude",
+      "baseArgs": ["-p", "--output-format", "text", "--permission-mode", "acceptEdits"],
+      "personaArg": "--append-system-prompt",
+      "promptVia": "positional",
+      "installed": true
+    },
+    "codex": {
+      "cmd": "codex",
+      "baseArgs": ["exec", "--full-auto"],
+      "personaArg": null,
+      "promptVia": "positional",
+      "installed": false,
+      "note": "codex CLI not yet verified installed/authed in the runner; personas folded into the prompt until a dedicated system-prompt flag is confirmed."
+    },
+    "gemini": {
+      "cmd": "gemini",
+      "baseArgs": ["--yolo"],
+      "personaArg": null,
+      "promptVia": "positional",
+      "installed": false,
+      "note": "gemini CLI not yet verified installed/authed in the runner; personas folded into the prompt."
+    }
+  }
+}
