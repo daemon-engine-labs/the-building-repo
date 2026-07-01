@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>daemon-engine-labs · summoning ladder</title>
+<style>
+  :root{ --ember:#ff6b1a; --gold:#ffcf5c; --blood:#e01e37; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#050203;color:#f3e7d8;font-family:Georgia,'Times New Roman',serif;}
+  header{padding:40px 24px 8px;text-align:center;}
+  h1{font-size:30px;letter-spacing:2px;margin:0;background:linear-gradient(90deg,var(--gold),var(--ember),var(--blood));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .sub{opacity:.6;font-style:italic;margin-top:8px;font-size:15px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:28px;padding:32px;max-width:1180px;margin:0 auto;}
+  .card{background:radial-gradient(120% 120% at 50% 30%,#140a0f,#0a0507);border:1px solid #2a141b;border-radius:18px;padding:20px;box-shadow:0 0 40px #7a0b1e22, inset 0 0 60px #00000066;}
+  .card svg{display:block;width:100%;height:auto;border-radius:12px}
+  .meta{margin-top:14px;display:flex;align-items:baseline;gap:10px}
+  .n{font-size:12px;color:var(--ember);letter-spacing:3px;font-family:ui-monospace,monospace}
+  .t{font-size:19px;color:var(--gold)}
+  .d{opacity:.62;font-size:13.5px;margin-top:4px;line-height:1.5}
+  .heat{margin-top:10px;height:5px;border-radius:3px;background:linear-gradient(90deg,#5bc8ff,var(--gold),var(--ember),var(--blood),#3a0208)}
+  footer{opacity:.4;text-align:center;padding:10px 0 50px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>daemon-engine-labs</h1>
+  <div class="sub">a summoning ladder — each one wilder than the last</div>
+</header>
+
+<div class="grid">
+
+  <!-- ══════════ 1. THE SIGIL ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="a-ember" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#fff3c4"/><stop offset="25%" stop-color="#ffcf5c"/>
+        <stop offset="55%" stop-color="#ff6b1a"/><stop offset="82%" stop-color="#e01e37"/><stop offset="100%" stop-color="#7a0b1e"/>
+      </radialGradient>
+      <linearGradient id="a-ring" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#ffcf5c"/><stop offset="50%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#e01e37"/>
+      </linearGradient>
+      <linearGradient id="a-horn" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#ff8a3c"/><stop offset="45%" stop-color="#b3121f"/><stop offset="100%" stop-color="#2a0409"/>
+      </linearGradient>
+      <filter id="a-glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <path id="a-incant" fill="none" d="M256,44 A212,212 0 1 1 255.9,44"/>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#0a0507"/>
+    <circle cx="256" cy="262" r="150" fill="#e01e37" opacity="0.16" filter="url(#a-glow)"/>
+    <g fill="none" stroke="url(#a-ring)">
+      <circle cx="256" cy="256" r="228" stroke-width="2" opacity=".8"/>
+      <circle cx="256" cy="256" r="196" stroke-width="1" opacity=".5"/>
+      <circle cx="256" cy="256" r="211" stroke-width="7" opacity=".4" stroke-dasharray="2 15.9" stroke-linecap="round"/>
+    </g>
+    <text font-size="15" letter-spacing="3" fill="#ffcf5c" opacity=".9" font-style="italic">
+      <textPath href="#a-incant">· imaginative · inventive · ingenious · originative · fecund · visionary · inspired · cosmoplastic · fertile · clever ·</textPath>
+    </text>
+    <g filter="url(#a-glow)"><circle cx="256" cy="72" r="7" fill="#ffe08a"/><circle cx="415" cy="349" r="7" fill="#ff6b1a"/><circle cx="97" cy="349" r="7" fill="#5bc8ff"/></g>
+    <circle cx="256" cy="256" r="120" fill="none" stroke="#2a0409" stroke-width="32"/>
+    <circle cx="256" cy="256" r="120" fill="none" stroke="url(#a-ring)" stroke-width="24" stroke-dasharray="7 24.4"/>
+    <circle cx="256" cy="256" r="98" fill="#0a0406" stroke="#ff6b1a" stroke-width="1.4" opacity=".9"/>
+    <g fill="url(#a-horn)" stroke="#ffb066" stroke-width="1" filter="url(#a-glow)">
+      <path d="M232,150 C214,120 196,96 168,84 C196,104 210,128 214,158 C220,152 226,150 232,150 Z"/>
+      <path d="M280,150 C298,120 316,96 344,84 C316,104 302,128 298,158 C292,152 286,150 280,150 Z"/>
+    </g>
+    <g filter="url(#a-glow)">
+      <path fill="url(#a-ember)" d="M256,182 C280,214 292,232 292,262 C292,296 274,318 256,332 C238,318 220,296 220,262 C220,232 232,214 256,182 Z"/>
+      <path fill="#fff6d8" opacity=".9" d="M256,226 C268,244 274,254 274,272 C274,292 264,304 256,312 C248,304 238,292 238,272 C238,254 244,244 256,226 Z"/>
+    </g>
+    <g filter="url(#a-glow)"><circle cx="322" cy="256" r="4" fill="#ff6b1a"/><circle cx="190" cy="256" r="4" fill="#5bc8ff"/></g>
+  </svg>
+    <div class="meta"><span class="n">I</span><span class="t">The Sigil</span></div>
+    <div class="d">Summoning circle, engine-cog, demon horns, Maxwell's flame. Your creativity synonyms inscribed as the incantation. Restrained — the badge you'd actually put on a README.</div>
+    <div class="heat"></div>
+  </div>
+
+  <!-- ══════════ 2. THE GATE ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="b-cold" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0a2a44"/><stop offset="100%" stop-color="#1c5f8f"/></linearGradient>
+      <linearGradient id="b-hot" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#e01e37"/><stop offset="100%" stop-color="#3a0208"/></linearGradient>
+      <radialGradient id="b-core" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff3c4"/><stop offset="60%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#7a0b1e"/></radialGradient>
+      <filter id="b-glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#050506"/>
+    <rect x="40" y="120" width="196" height="272" rx="10" fill="url(#b-cold)" opacity=".85"/>
+    <rect x="276" y="120" width="196" height="272" rx="10" fill="url(#b-hot)" opacity=".9"/>
+    <!-- cold particles left, slow -->
+    <g fill="#bfe9ff" filter="url(#b-glow)"><circle cx="80" cy="180" r="4"/><circle cx="150" cy="300" r="4"/><circle cx="110" cy="350" r="3"/><circle cx="190" cy="200" r="3"/><circle cx="70" cy="300" r="3"/></g>
+    <!-- hot particles right, fast (streaks) -->
+    <g stroke="#ffcf5c" stroke-width="3" stroke-linecap="round" filter="url(#b-glow)"><line x1="320" y1="180" x2="360" y2="176"/><line x1="400" y1="300" x2="446" y2="296"/><line x1="350" y1="350" x2="392" y2="345"/><line x1="420" y1="210" x2="458" y2="206"/></g>
+    <!-- THE GATE: central pillar + demon -->
+    <rect x="240" y="96" width="32" height="320" rx="6" fill="#0a0406" stroke="url(#b-core)" stroke-width="2"/>
+    <circle cx="256" cy="256" r="46" fill="url(#b-core)" filter="url(#b-glow)"/>
+    <!-- little demon silhouette on the gate -->
+    <g fill="#0a0406"><path d="M244,240 l-8,-16 l10,6 q10,-8 20,0 l10,-6 l-8,16 q6,10 0,22 q-12,10 -24,0 q-6,-12 0,-22 Z"/><circle cx="250" cy="252" r="2.4" fill="#ff6b1a"/><circle cx="262" cy="252" r="2.4" fill="#ff6b1a"/></g>
+    <text x="256" y="446" text-anchor="middle" font-size="15" fill="#ffcf5c" opacity=".8" font-style="italic" letter-spacing="4">it sorts order from chaos</text>
+    <text x="138" y="150" text-anchor="middle" font-size="13" fill="#bfe9ff" opacity=".7" letter-spacing="3">COLD</text>
+    <text x="374" y="150" text-anchor="middle" font-size="13" fill="#ffcf5c" opacity=".8" letter-spacing="3">HOT</text>
+  </svg>
+    <div class="meta"><span class="n">II</span><span class="t">The Gate</span></div>
+    <div class="d">Maxwell's demon made literal: two chambers, a gate, a tiny devil sorting fast (hot) from slow (cold). The actual mechanism of the whole repo — issues sorted into ships — as a diagram that happens to be a logo.</div>
+    <div class="heat"></div>
+  </div>
+
+  <!-- ══════════ 3. OUROBOROS ENGINE ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="c-core" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff6d8"/><stop offset="40%" stop-color="#ffcf5c"/><stop offset="75%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#7a0b1e"/></radialGradient>
+      <linearGradient id="c-scale" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffcf5c"/><stop offset="50%" stop-color="#c81530"/><stop offset="100%" stop-color="#3a0208"/></linearGradient>
+      <filter id="c-glow" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#080306"/>
+    <circle cx="256" cy="256" r="150" fill="#e01e37" opacity=".14" filter="url(#c-glow)"/>
+    <!-- the serpent body: thick ring with scale-dashes -->
+    <circle cx="256" cy="256" r="168" fill="none" stroke="#2a0409" stroke-width="40"/>
+    <circle cx="256" cy="256" r="168" fill="none" stroke="url(#c-scale)" stroke-width="34" stroke-dasharray="10 18" stroke-linecap="round" opacity=".95"/>
+    <!-- engine teeth inside the serpent -->
+    <circle cx="256" cy="256" r="120" fill="none" stroke="url(#c-scale)" stroke-width="20" stroke-dasharray="6 22" opacity=".8"/>
+    <!-- serpent head biting tail, at top -->
+    <g filter="url(#c-glow)">
+      <path d="M256,74 q40,4 46,34 q4,26 -20,36 q-26,8 -26,-14 q0,-16 14,-18 q10,-2 8,8" fill="url(#c-scale)" stroke="#ffb066" stroke-width="1.4"/>
+      <circle cx="288" cy="96" r="4.5" fill="#fff3c4"/>
+      <path d="M240,86 l-14,-12 l18,4 Z" fill="url(#c-scale)"/>
+    </g>
+    <!-- combustion heart -->
+    <circle cx="256" cy="256" r="70" fill="url(#c-core)" filter="url(#c-glow)"/>
+    <circle cx="256" cy="256" r="34" fill="#fff6d8" opacity=".92"/>
+    <text x="256" y="470" text-anchor="middle" font-size="14" fill="#ffcf5c" opacity=".7" font-style="italic" letter-spacing="3">it rewrites its own body</text>
+  </svg>
+    <div class="meta"><span class="n">III</span><span class="t">Ouroboros Engine</span></div>
+    <div class="d">A serpent-daemon eating its own tail forms the engine ring — the self-modifying repo, literally consuming and regenerating itself. Scales double as cog teeth. Now we're leaving "tasteful."</div>
+    <div class="heat"></div>
+  </div>
+
+  <!-- ══════════ 4. PENTAGRAM REACTOR ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="d-plasma" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#ffffff"/><stop offset="30%" stop-color="#ffe08a"/><stop offset="60%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#7a0b1e"/></radialGradient>
+      <linearGradient id="d-ring" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffcf5c"/><stop offset="100%" stop-color="#e01e37"/></linearGradient>
+      <filter id="d-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#060205"/>
+    <circle cx="256" cy="256" r="170" fill="#e01e37" opacity=".18" filter="url(#d-glow)"/>
+    <circle cx="256" cy="256" r="200" fill="none" stroke="url(#d-ring)" stroke-width="2" opacity=".7"/>
+    <circle cx="256" cy="256" r="186" fill="none" stroke="url(#d-ring)" stroke-width="6" stroke-dasharray="2 14" stroke-linecap="round" opacity=".4"/>
+    <!-- gear behind -->
+    <circle cx="256" cy="256" r="150" fill="none" stroke="url(#d-ring)" stroke-width="18" stroke-dasharray="6 26" opacity=".5"/>
+    <!-- INVERTED PENTAGRAM (point down) inscribed in r=170 -->
+    <g stroke="url(#d-ring)" stroke-width="5" fill="none" stroke-linejoin="round" filter="url(#d-glow)" opacity=".95">
+      <polygon points="256,426 421,166 62,281 450,281 91,166"/>
+    </g>
+    <!-- plasma reactor core -->
+    <circle cx="256" cy="256" r="54" fill="url(#d-plasma)" filter="url(#d-glow)"/>
+    <circle cx="256" cy="256" r="22" fill="#fff"/>
+    <!-- node lamps at the 5 points -->
+    <g fill="#ffe08a" filter="url(#d-glow)"><circle cx="256" cy="426" r="6"/><circle cx="421" cy="166" r="6"/><circle cx="91" cy="166" r="6"/><circle cx="450" cy="281" r="6"/><circle cx="62" cy="281" r="6"/></g>
+  </svg>
+    <div class="meta"><span class="n">IV</span><span class="t">Pentagram Reactor</span></div>
+    <div class="d">Inverted pentagram fused with a gear, a plasma singularity at the crossing. Occult-industrial. This is the one that gets the repo flagged by someone's HR department — and it slaps.</div>
+    <div class="heat"></div>
+  </div>
+
+  <!-- ══════════ 5. FURNACE SKULL ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="e-eye" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff6d8"/><stop offset="45%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#7a0b1e"/></radialGradient>
+      <linearGradient id="e-bone" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#3a1b12"/><stop offset="100%" stop-color="#120708"/></linearGradient>
+      <linearGradient id="e-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffb066"/><stop offset="50%" stop-color="#b3121f"/><stop offset="100%" stop-color="#2a0409"/></linearGradient>
+      <filter id="e-glow" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#070204"/>
+    <circle cx="256" cy="300" r="150" fill="#e01e37" opacity=".2" filter="url(#e-glow)"/>
+    <!-- horns -->
+    <g fill="url(#e-horn)" filter="url(#e-glow)">
+      <path d="M176,150 C150,104 120,72 74,58 C120,90 138,130 150,180 C160,166 168,158 176,150 Z"/>
+      <path d="M336,150 C362,104 392,72 438,58 C392,90 374,130 362,180 C352,166 344,158 336,150 Z"/>
+    </g>
+    <!-- cranium -->
+    <path d="M256,120 C340,120 392,180 392,256 C392,312 360,344 340,360 L332,404 C330,418 316,424 300,424 L212,424 C196,424 182,418 180,404 L172,360 C152,344 120,312 120,256 C120,180 172,120 256,120 Z" fill="url(#e-bone)" stroke="#5a2a1c" stroke-width="2"/>
+    <!-- eye sockets: furnaces -->
+    <g filter="url(#e-glow)"><ellipse cx="208" cy="250" rx="34" ry="40" fill="url(#e-eye)"/><ellipse cx="304" cy="250" rx="34" ry="40" fill="url(#e-eye)"/><ellipse cx="208" cy="250" rx="12" ry="16" fill="#fff6d8"/><ellipse cx="304" cy="250" rx="12" ry="16" fill="#fff6d8"/></g>
+    <!-- nose -->
+    <path d="M256,286 l-20,44 l20,-8 l20,8 Z" fill="#0a0304"/>
+    <!-- gear-teeth jaw of flame -->
+    <g fill="url(#e-eye)" filter="url(#e-glow)">
+      <path d="M196,392 l10,26 l10,-26 Z"/><path d="M226,392 l10,30 l10,-30 Z"/><path d="M256,392 l10,26 l10,-26 Z"/><path d="M286,392 l10,30 l10,-30 Z"/><path d="M316,392 l10,26 l10,-26 Z"/>
+    </g>
+  </svg>
+    <div class="meta"><span class="n">V</span><span class="t">Furnace Skull</span></div>
+    <div class="d">A daemon skull whose eye-sockets are open furnaces and whose teeth are fangs of flame. The horns are back and bigger. This is a metal album cover that also runs CI.</div>
+    <div class="heat"></div>
+  </div>
+
+  <!-- ══════════ 6. HELLMOUTH MACHINE ══════════ -->
+  <div class="card">
+  <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="f-eye" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff"/><stop offset="25%" stop-color="#ffe08a"/><stop offset="55%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#3a0208"/></radialGradient>
+      <linearGradient id="f-tooth" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffcf5c"/><stop offset="100%" stop-color="#7a0b1e"/></linearGradient>
+      <linearGradient id="f-metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ff8a3c"/><stop offset="100%" stop-color="#3a0208"/></linearGradient>
+      <filter id="f-glow" x="-90%" y="-90%" width="280%" height="280%"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="512" height="512" rx="20" fill="#040103"/>
+    <circle cx="256" cy="256" r="200" fill="#e01e37" opacity=".22" filter="url(#f-glow)"/>
+    <!-- radiating gear spokes / machine limbs -->
+    <g stroke="url(#f-metal)" stroke-width="10" stroke-linecap="round" opacity=".8" filter="url(#f-glow)">
+      <g id="spokegrp">
+        <line x1="256" y1="256" x2="256" y2="40"/>
+      </g>
+      <line x1="256" y1="256" x2="256" y2="40"/><line x1="256" y1="256" x2="256" y2="472"/>
+      <line x1="256" y1="256" x2="40" y2="256"/><line x1="256" y1="256" x2="472" y2="256"/>
+      <line x1="256" y1="256" x2="104" y2="104"/><line x1="256" y1="256" x2="408" y2="408"/>
+      <line x1="256" y1="256" x2="408" y2="104"/><line x1="256" y1="256" x2="104" y2="408"/>
+    </g>
+    <!-- gear hubs at spoke ends -->
+    <g fill="none" stroke="url(#f-tooth)" stroke-width="9" stroke-dasharray="4 12">
+      <circle cx="256" cy="40" r="20"/><circle cx="256" cy="472" r="20"/><circle cx="40" cy="256" r="20"/><circle cx="472" cy="256" r="20"/>
+      <circle cx="104" cy="104" r="16"/><circle cx="408" cy="408" r="16"/><circle cx="408" cy="104" r="16"/><circle cx="104" cy="408" r="16"/>
+    </g>
+    <!-- the maw: ring of teeth around the eye -->
+    <circle cx="256" cy="256" r="150" fill="#0a0304"/>
+    <g fill="url(#f-tooth)" filter="url(#f-glow)">
+      <!-- 16 teeth pointing inward -->
+      <g><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(22.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(45 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(67.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(90 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(112.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(135 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(157.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(180 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(202.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(225 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(247.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(270 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(292.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(315 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+      <g transform="rotate(337.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    </g>
+    <!-- the all-seeing furnace eye -->
+    <circle cx="256" cy="256" r="82" fill="url(#f-eye)" filter="url(#f-glow)"/>
+    <ellipse cx="256" cy="256" rx="26" ry="70" fill="#1a0204"/>
+    <ellipse cx="256" cy="256" rx="11" ry="42" fill="#fff6d8"/>
+    <!-- horns crowning it -->
+    <g fill="url(#f-metal)" filter="url(#f-glow)">
+      <path d="M150,150 C120,96 92,58 44,40 C96,78 116,120 132,182 Z"/>
+      <path d="M362,150 C392,96 420,58 468,40 C416,78 396,120 380,182 Z"/>
+    </g>
+  </svg>
+    <div class="meta"><span class="n">VI</span><span class="t">Hellmouth Machine</span></div>
+    <div class="d">Maximal. A radiating gear-organism with a toothed maw and a single all-seeing furnace eye, horned, spitting heat in every direction. The daemon-engine as an angry god. There is no wilder — this is the top of the ladder.</div>
+    <div class="heat"></div>
+  </div>
+
+</div>
+<footer>daemon-engine-labs · Maxwell · Kelvin · Carnot · three enter, one PR leaves</footer>
+</body>
+</html>

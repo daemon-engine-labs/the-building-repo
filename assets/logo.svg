@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="daemon-engine-labs">
+  <defs>
+    <radialGradient id="f-eye" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fff"/><stop offset="25%" stop-color="#ffe08a"/><stop offset="55%" stop-color="#ff6b1a"/><stop offset="100%" stop-color="#3a0208"/></radialGradient>
+    <linearGradient id="f-tooth" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffcf5c"/><stop offset="100%" stop-color="#7a0b1e"/></linearGradient>
+    <linearGradient id="f-metal" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ff8a3c"/><stop offset="100%" stop-color="#3a0208"/></linearGradient>
+    <filter id="f-glow" x="-90%" y="-90%" width="280%" height="280%"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="512" height="512" rx="20" fill="#040103"/>
+  <circle cx="256" cy="256" r="200" fill="#e01e37" opacity=".22" filter="url(#f-glow)"/>
+  <!-- radiating machine limbs -->
+  <g stroke="url(#f-metal)" stroke-width="10" stroke-linecap="round" opacity=".8" filter="url(#f-glow)">
+    <line x1="256" y1="256" x2="256" y2="40"/><line x1="256" y1="256" x2="256" y2="472"/>
+    <line x1="256" y1="256" x2="40" y2="256"/><line x1="256" y1="256" x2="472" y2="256"/>
+    <line x1="256" y1="256" x2="104" y2="104"/><line x1="256" y1="256" x2="408" y2="408"/>
+    <line x1="256" y1="256" x2="408" y2="104"/><line x1="256" y1="256" x2="104" y2="408"/>
+  </g>
+  <!-- gear hubs at spoke ends -->
+  <g fill="none" stroke="url(#f-tooth)" stroke-width="9" stroke-dasharray="4 12">
+    <circle cx="256" cy="40" r="20"/><circle cx="256" cy="472" r="20"/><circle cx="40" cy="256" r="20"/><circle cx="472" cy="256" r="20"/>
+    <circle cx="104" cy="104" r="16"/><circle cx="408" cy="408" r="16"/><circle cx="408" cy="104" r="16"/><circle cx="104" cy="408" r="16"/>
+  </g>
+  <!-- the maw -->
+  <circle cx="256" cy="256" r="150" fill="#0a0304"/>
+  <g fill="url(#f-tooth)" filter="url(#f-glow)">
+    <g><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(22.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(45 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(67.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(90 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(112.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(135 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(157.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(180 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(202.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(225 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(247.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(270 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(292.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(315 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+    <g transform="rotate(337.5 256 256)"><path d="M256,110 l14,40 l-28,0 Z"/></g>
+  </g>
+  <!-- the all-seeing furnace eye -->
+  <circle cx="256" cy="256" r="82" fill="url(#f-eye)" filter="url(#f-glow)"/>
+  <ellipse cx="256" cy="256" rx="26" ry="70" fill="#1a0204"/>
+  <ellipse cx="256" cy="256" rx="11" ry="42" fill="#fff6d8"/>
+  <!-- crowning horns -->
+  <g fill="url(#f-metal)" filter="url(#f-glow)">
+    <path d="M150,150 C120,96 92,58 44,40 C96,78 116,120 132,182 Z"/>
+    <path d="M362,150 C392,96 420,58 468,40 C416,78 396,120 380,182 Z"/>
+  </g>
+</svg>
