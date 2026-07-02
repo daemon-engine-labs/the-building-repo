@@ -3,7 +3,7 @@
   "agents": {
     "claude": {
       "cmd": "claude",
-      "baseArgs": ["-p", "--output-format", "text", "--permission-mode", "acceptEdits"],
+      "baseArgs": ["-p", "--output-format", "text", "--dangerously-skip-permissions"],
       "personaArg": "--append-system-prompt",
       "promptVia": "positional",
       "installed": true

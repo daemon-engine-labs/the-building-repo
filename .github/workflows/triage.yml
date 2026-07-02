@@ -68,8 +68,37 @@ jobs:
     if: needs.gate.outputs.trusted == 'true'
     runs-on: [self-hosted, privileged]
     environment: privileged
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      # Secret injected only for this job (env-scoped, gated by the environment's required reviewer).
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      # Issue fields via env — NEVER interpolated into a shell string (injection surface).
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - uses: actions/checkout@v4
-      - name: placeholder
-        run: echo "privileged path reached for an allowlisted actor (no secrets wired yet)"
-      # TODO(after gate proven + secrets added): run the arena with real tokens via env, open a PR.
+      - name: forge — Maxwell (claude) builds the issue
+        run: |
+          git config user.name "daemon-engine[bot]"
+          git config user.email "daemon-engine@users.noreply.github.com"
+          git checkout -b "agent/issue-${ISSUE_NUMBER}"
+          # arena/run.mjs reads ISSUE_TITLE/ISSUE_BODY from env (no interpolation).
+          AGENT=claude MODE=privileged node arena/run.mjs || echo "arena exited rc=$?"
+      - name: open PR if the forge produced changes
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes produced — nothing to PR."
+            exit 0
+          fi
+          git add -A
+          git commit -m "feat: build for #${ISSUE_NUMBER}" -m "${ISSUE_TITLE}
+
+Built by Maxwell (claude) via the arena for #${ISSUE_NUMBER}."
+          git push origin "agent/issue-${ISSUE_NUMBER}" --force
+          gh pr create --base main --head "agent/issue-${ISSUE_NUMBER}" \
+            --title "Build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+            --body "Automated build by the arena (Maxwell/claude) for #${ISSUE_NUMBER}. Review before merge."
