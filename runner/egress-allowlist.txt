@@ -10,6 +10,10 @@
 (^|\.)actions\.githubusercontent\.com$
 codeload\.github\.com$
 api\.github\.com$
+# Azure blob storage — Actions uploads job logs/artifacts here (needed to READ run logs).
+# Tradeoff: broad blob egress. Acceptable — privileged runner is trusted code; sandbox holds no secrets.
+(^|\.)blob\.core\.windows\.net$
+cli\.github\.com$
 
 # ── Model APIs (the whole point) ──
 api\.anthropic\.com$
