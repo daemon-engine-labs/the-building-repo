@@ -1,6 +1,2 @@
-# Trusted GitHub logins. One per line. Comments (#) and blank lines ignored.
-# An actor here can trigger the PRIVILEGED build path (real tokens, publishing, spending).
-# Everyone else can only PROPOSE — a sandboxed, zero-secret build that opens a PR for review.
-#
-# Editing this file is itself a gated PR to main: trust is granted by merge, never by issue.
-nickmeinhold
+# TEMPORARILY EMPTY for the env-secret-invisibility proof — nickmeinhold restored right after.
+# nickmeinhold
