@@ -23,6 +23,14 @@
       "promptVia": "positional",
       "installed": false,
       "note": "gemini CLI not yet verified installed/authed in the runner; personas folded into the prompt."
+    },
+    "grok": {
+      "cmd": "grok",
+      "baseArgs": ["--yolo"],
+      "personaArg": null,
+      "promptVia": "positional",
+      "installed": false,
+      "note": "Boltzmann. xAI Grok Build CLI (@xai-official/grok). Exact non-interactive/system-prompt flags UNVERIFIED — confirm in-runner before enabling. Needs SuperGrok sub or XAI_API_KEY."
     }
   }
 }
