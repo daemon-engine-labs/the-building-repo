@@ -1,6 +1,6 @@
 # the-building-repo
 
-> File an issue. Three rival agents — Claude, Codex, Gemini — read it, build it, and ship it. They can rewrite their own personas and their own toolset. The repo evolves itself.
+> File an issue. Four rival agents — Claude, Codex, Gemini, Grok — read it, build it, and ship it. They can rewrite their own personas and their own toolset. The repo evolves itself.
 
 This is an experiment in **issue-driven, self-evolving multi-agent software production**. You describe what you want — a feature, a bug fix, a whole product — and an agent picks it up, writes the code, opens a PR, and (eventually) ships iOS/Android/web products from it.
 

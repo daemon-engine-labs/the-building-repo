@@ -13,13 +13,13 @@ builds the way its author thinks: **generate alive → forge → adversarially s
 | # | Phase | Skill | Thermo | What runs |
 |---|---|---|---|---|
 | 1 | **Vision** | `/ascend` | heat *in* | Heat the raw issue through the five termini (Ember→Kindle→Combust→Resonance→Silence). Select the most *alive* build-vision, not the literal-dead reading. Output: a vision brief the builders work from. |
-| 2 | **Forge** | the rivalry | work | Maxwell, Kelvin, Carnot each build the vision on their own branch. |
+| 2 | **Forge** | the rivalry | work | Maxwell, Kelvin, Carnot, Boltzmann each build the vision on their own branch. |
 | 3 | **Sort** | `/cage-match` | demon sorts | The three cross-review adversarially (each with a different inductive bias). Strict merge gate. Rounds repeat until consensus. Picks the winner and hardens it. |
 | 4 | **Distill** | `/spiral-review` | heat *out* | When a round yields 3+ rhyming findings, spiral them into one principle → PR to `agents/*/*.md`. Heat out of this cycle preheats the next. |
 
 ## Why the pantheon is the point
 
-Cage-match's three reviewers *are* the three builders — Maxwell (Claude), Kelvin (Gemini), Carnot
+Cage-match's four reviewers *are* the four builders — Maxwell (Claude), Kelvin (Gemini), Carnot
 (Codex) — the thermodynamicists who taught us how order is wrung from heat. The value of a
 cage-match is that the reviewers have **different inductive biases**: same-family review approves
 what compiles and misses what the code is *for*. So each reviewer gets a distinct lens
@@ -28,6 +28,7 @@ what compiles and misses what the code is *for*. So each reviewer gets a distinc
 - **Maxwell — the demon at the gate.** Sorts signal from noise. Reviews for *purpose and correctness*: does it do what it's FOR? Trust boundaries, feature-interaction, state-space.
 - **Kelvin — absolute zero.** The exacting floor. Reviews for *failure at the limits*: nulls, empty sets, races, the cold edge cases that only bite in production.
 - **Carnot — the ideal engine.** Maximum work from the cycle. Reviews for *efficiency and simplicity*: is this the least code? Reuse over reinvention, no wasted motion.
+- **Boltzmann — the ensemble.** Statistical mechanics (`S = k log W`). Reviews for *the aggregate and the improbable*: does a per-item property hold across the whole distribution of inputs and states? Emergent, probabilistic, load-dependent failures.
 
 ## The two governing decisions
 
