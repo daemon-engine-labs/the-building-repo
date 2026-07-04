@@ -6,7 +6,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$HERE/.." && git rev-parse --show-toplevel 2>/dev/null || cd "$HERE/.." && pwd)"
+# Single-value fallback (NOT `git ... || pwd` — that precedence prints both, and a two-line
+# REPO_ROOT breaks the sed below with an embedded newline).
+REPO_ROOT="$(git -C "$HERE/.." rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_ROOT" ] || REPO_ROOT="$(cd "$HERE/.." && pwd)"
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
 LA_DIR="$HOME/Library/LaunchAgents"
