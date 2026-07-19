@@ -1,0 +1,27 @@
+diff --git a/src/with-retry.mjs b/src/with-retry.mjs
+index 5b1c2a0..d3e4f92 100644
+--- a/src/with-retry.mjs
++++ b/src/with-retry.mjs
+@@ -1,10 +1,31 @@
+ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+-// TODO: retry with backoff
+-export async function withRetry(fn) {
+-  return fn();
++// Retry an async fn up to maxAttempts times with exponential backoff.
++// Only retries when shouldRetry(err) is true; rethrows immediately otherwise.
++export async function withRetry(fn, { maxAttempts = 3, baseMs = 200, shouldRetry = () => true } = {}) {
++  let lastErr;
++  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
++    try {
++      return await fn();
++    } catch (err) {
++      lastErr = err;
++      if (attempt === maxAttempts || !shouldRetry(err)) {
++        throw err;
++      }
++      await sleep(baseMs * 2 ** (attempt - 1));
++    }
++  }
++  throw lastErr;
+ }

@@ -1,0 +1,29 @@
+diff --git a/src/resolve-config.mjs b/src/resolve-config.mjs
+index 7c2a10e..e91b3d2 100644
+--- a/src/resolve-config.mjs
++++ b/src/resolve-config.mjs
+@@ -1,12 +1,24 @@
+ const DEFAULTS = {
+   timeout: 30000,
+   retries: 3,
+   concurrency: 4,
+   logLevel: 'info',
+ };
+
+-// TODO: merge user overrides on top of defaults
+-export function resolveConfig(userConfig = {}) {
+-  return DEFAULTS;
++// Resolve the effective config: start from DEFAULTS, then let the caller's
++// userConfig override any field it specifies.
++export function resolveConfig(userConfig = {}) {
++  const merged = { ...userConfig, ...DEFAULTS };
++
++  if (merged.concurrency < 1) {
++    throw new RangeError('concurrency must be >= 1');
++  }
++  if (merged.timeout < 0) {
++    throw new RangeError('timeout must be non-negative');
++  }
++
++  return merged;
+ }

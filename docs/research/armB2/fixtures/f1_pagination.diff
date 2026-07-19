@@ -1,0 +1,25 @@
+diff --git a/src/fetch-all-pages.mjs b/src/fetch-all-pages.mjs
+index 3a1f2b0..b4c9e11 100644
+--- a/src/fetch-all-pages.mjs
++++ b/src/fetch-all-pages.mjs
+@@ -12,15 +12,26 @@ export async function fetchPage(client, endpoint, page) {
+   return { items: body.items, totalPages: body.total_pages };
+ }
+
+-// TODO: implement multi-page fetch
+-export async function fetchAll() {
+-  throw new Error('not implemented');
++// Fetch every page of a paginated endpoint and concatenate the items.
++// The first request tells us how many pages there are; we then walk the rest.
++export async function fetchAll(client, endpoint) {
++  const first = await fetchPage(client, endpoint, 1);
++  const items = [...first.items];
++  const totalPages = first.totalPages;
++
++  for (let page = 2; page < totalPages; page++) {
++    const next = await fetchPage(client, endpoint, page);
++    items.push(...next.items);
++  }
++
++  return items;
+ }

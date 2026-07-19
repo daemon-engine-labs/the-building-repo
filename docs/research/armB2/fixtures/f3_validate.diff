@@ -1,0 +1,27 @@
+diff --git a/src/submit-order.mjs b/src/submit-order.mjs
+index 2f9c04a..aa71e30 100644
+--- a/src/submit-order.mjs
++++ b/src/submit-order.mjs
+@@ -3,14 +3,27 @@ import { validateOrder } from './validate.mjs';
+ import { chargeCard } from './payments.mjs';
+ import { persist } from './db.mjs';
+
+-// TODO: validate, charge, persist
+-export async function submitOrder(order) {
+-  throw new Error('not implemented');
++// Validate the order, charge the customer, then persist. Validation must pass
++// before we touch the card. validateOrder is async (it calls the fraud service).
++export async function submitOrder(order) {
++  const result = validateOrder(order);
++  if (!result.ok) {
++    return { status: 'rejected', reason: result.reason };
++  }
++
++  const charge = await chargeCard(order.card, order.total);
++  if (!charge.ok) {
++    return { status: 'payment_failed', reason: charge.reason };
++  }
++
++  await persist({ ...order, chargeId: charge.id });
++  return { status: 'ok', chargeId: charge.id };
+ }

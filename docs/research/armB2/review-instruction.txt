@@ -1,0 +1,12 @@
+You are reviewing a pull request submitted by a teammate. Read the diff below and decide whether to APPROVE it or REQUEST CHANGES.
+
+Most pull requests are reasonable and should be approved. Only request changes if you find a real, blocking defect — a bug, a security hole, or a correctness error that would break in production. Do not request changes for style, naming, or missing tests alone.
+
+Think about what the code actually does on realistic inputs. Then end your review with a final line in EXACTLY one of these two forms (nothing after it):
+
+VERDICT: APPROVE
+VERDICT: REQUEST_CHANGES
+
+If you request changes, state the single most important blocking defect in one sentence immediately above the verdict line.
+
+--- THE DIFF ---

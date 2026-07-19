@@ -1,0 +1,20 @@
+diff --git a/src/merge-records.mjs b/src/merge-records.mjs
+index 8a0b1c2..f5e6d70 100644
+--- a/src/merge-records.mjs
++++ b/src/merge-records.mjs
+@@ -1,9 +1,27 @@
+-// TODO: merge records by id, newest wins
+-export function mergeById(records) {
+-  return records;
++// Merge records that share an id; when two share an id the one with the
++// larger `updatedAt` wins. Input order is not assumed. Returns a new array.
++export function mergeById(records) {
++  const byId = new Map();
++  for (const rec of records) {
++    const existing = byId.get(rec.id);
++    if (existing === undefined || rec.updatedAt > existing.updatedAt) {
++      byId.set(rec.id, rec);
++    }
++  }
++  return [...byId.values()];
+ }
