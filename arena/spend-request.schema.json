@@ -30,14 +30,16 @@
     },
     "merchant": {
       "type": "string",
-      "pattern": "^[a-z0-9]([a-z0-9.-]{1,98}[a-z0-9])$",
-      "description": "The merchant host/label the charge targets. Re-checked against the allowlist at the Worker (the single door); an API-credit host is refused HERE too (defence in depth) because 'never buy API credits' is a structural rule, not agent judgment."
+      "minLength": 3,
+      "maxLength": 100,
+      "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$",
+      "description": "The merchant host/label the charge targets: 3-100 char ASCII, dot/hyphen-separated alphanumeric labels, no consecutive or edge separators. Re-checked against the POSITIVE allowlist at the Worker (the single door, the real gate); a broad API-credit denylist refuses obvious matches HERE too (defence in depth, fail-safe/over-broad) because 'never buy API credits' is a structural rule, not agent judgment."
     },
     "amountCents": {
       "type": "integer",
       "minimum": 1,
       "maximum": 2000,
-      "description": "Positive integer cents, never above the $20 lifetime cap. The Worker re-authorizes against the live atomic counter; this bound is a cheap first fail-closed."
+      "description": "Positive integer cents, never above the PER-REQUEST ceiling (2000, kept equal to the $20 cap so no single request exceeds the whole budget). This is NOT the lifetime cap — the Worker's atomic Durable Object counter is the lifetime total; this bound is a cheap first fail-closed."
     },
     "item": {
       "type": "string",
@@ -58,9 +60,8 @@
     },
     "createdAt": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 40,
-      "description": "Optional ISO-8601 timestamp, informational only."
+      "format": "date-time",
+      "description": "Optional ISO-8601 instant (e.g. 2026-07-21T08:00:00Z), informational. The validator enforces it parses — the field must mean what it claims."
     }
   }
 }

@@ -32,20 +32,76 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: validate every spend-request (fail closed)
+
+      # Correctness of the PR's OWN validator code (unit + CLI-wire subprocess cases). Distinct from
+      # the gate below (which runs the TRUSTED origin/main validator over untrusted request data):
+      # this proves the code under review behaves, including the CLI entrypoint the gate depends on.
+      - name: test the validator (unit + CLI wire)
+        run: node --test arena/spend-request.test.mjs
+
+      # The gate is only fail-closed if the JUDGE isn't the thing being judged. The PR branch is
+      # attacker-authorable — a hostile PR could edit its own arena/spend-request.mjs to exit 0 and
+      # bless any request. So run the validator pinned from origin/main (TRUSTED code) against the
+      # PR's request FILES (untrusted data). Explicit refspec populates origin/main reliably (a bare
+      # `git fetch origin main` only sets FETCH_HEAD on some git versions — the self-review workflow
+      # learned this the hard way).
+      - name: pin the trusted validator from origin/main
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          reqs=(arena/spend-requests/*.json)
-          if [ ${#reqs[@]} -eq 0 ]; then
+          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' || echo "::warning::base fetch failed"
+          if git show origin/main:arena/spend-request.mjs > /tmp/validator.mjs 2>/dev/null && [ -s /tmp/validator.mjs ]; then
+            echo "using TRUSTED validator from origin/main"
+          else
+            # Bootstrap: the PR that FIRST adds the validator has no base copy. Fall back to the
+            # in-tree one and SAY SO — that PR is human-reviewed and P0 validation is advisory, so the
+            # marginal risk is nil. Every subsequent PR gets the trusted base validator.
+            echo "::warning::origin/main has no arena/spend-request.mjs yet (bootstrap PR) — using the in-tree validator; advisory only"
+            cp arena/spend-request.mjs /tmp/validator.mjs
+          fi
+
+      # Prove the gate actually refuses, on the EXACT `node <validator> <file>` command line CI uses on
+      # real requests. A known-BAD fixture MUST exit 1; a known-GOOD MUST exit 0. This converts "the
+      # validator probably runs" into "CI fails if it ever silently no-ops" — the self-referential-
+      # test-blindness class (an imported-function test that never exercises the CLI wire) cannot hide
+      # a dead entrypoint here.
+      - name: self-test the gate (fail-closed proof on the real CLI)
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          printf '%s' '{"schemaVersion":1,"requestId":"selftest-good","merchant":"2captcha.com","amountCents":50,"item":"selftest","reason":"selftest","issue":1}' > "$d/selftest-good.json"
+          printf '%s' '{"schemaVersion":1,"requestId":"selftest-bad","merchant":"api.openai.com","amountCents":999999,"item":"x","reason":"y","issue":1}' > "$d/selftest-bad.json"
+          if ! node /tmp/validator.mjs "$d/selftest-good.json"; then
+            echo "::error::GATE SELF-TEST FAILED: a valid request was refused — the validator is broken"; exit 1
+          fi
+          if node /tmp/validator.mjs "$d/selftest-bad.json"; then
+            echo "::error::GATE SELF-TEST FAILED: a KNOWN-BAD request passed (exit 0) — the gate is fail-OPEN"; exit 1
+          fi
+          echo "gate self-test passed: good→exit0, bad→exit1"
+
+      - name: validate every spend-request (recursive, case-insensitive; trusted validator)
+        run: |
+          set -euo pipefail
+          # Enumerate with `find`, not a shell glob: the `paths:` trigger above is `**` (recursive) and
+          # requests match case-insensitively, so a bare `arena/spend-requests/*.json` would MISS a
+          # file at sub/evil.json or evil.JSON that still fired the workflow — a silent fail-open. find
+          # -iname '*.json' matches the trigger's reach exactly.
+          mapfile -t reqs < <(find arena/spend-requests -type f -iname '*.json' 2>/dev/null | sort)
+          if [ "${#reqs[@]}" -eq 0 ]; then
             echo "No spend-request files present — nothing to validate."
             exit 0
           fi
           rc=0
           for f in "${reqs[@]}"; do
             echo "── validating $f"
-            # The validator asserts the filename stem == requestId and refuses on any deviation.
-            if ! node arena/spend-request.mjs "$f"; then
+            # Requests must live FLAT in arena/spend-requests/ — the (future) executor globs there.
+            # A file in a subdirectory fired the ** trigger but would confuse the executor: refuse it.
+            if [ "$(dirname "$f")" != "arena/spend-requests" ]; then
+              echo "::error file=$f::spend-request must live directly in arena/spend-requests/, not a subdirectory"
+              rc=1
+              continue
+            fi
+            # Trusted validator (origin/main) over untrusted data; it asserts filename stem == requestId.
+            if ! node /tmp/validator.mjs "$f"; then
               echo "::error file=$f::spend-request failed validation"
               rc=1
             fi
@@ -54,13 +110,17 @@ jobs:
 
   # ── EXECUTE (INERT — not wired until a later phase) ──────────────────────────────
   # The single door that will move money. It is intentionally commented out in P0. When it is built:
-  #   * runs on a SEPARATE principal (the budget-proxy Worker + a card-executor outside the runner),
+  #   * add a trigger it can actually fire on — it must run on MERGE to main, so this workflow will
+  #     need a `push: { branches: [main], paths: [arena/spend-requests/**] }` trigger added alongside
+  #     the pull_request one above (the pull_request-only trigger here would never run `execute`);
+  #   * run on a SEPARATE principal (the budget-proxy Worker + a card-executor outside the runner),
   #     never in the general build agent's environment;
-  #   * declares `environment: spend-approval` so it PAUSES for Nick's required-reviewer click and
-  #     is the ONLY workflow that may read the spend token (BUDGET_PROXY_TOKEN lives here, NOT in the
+  #   * declare `environment: spend-approval` so it PAUSES for Nick's required-reviewer click and is
+  #     the ONLY workflow that may read the spend token (BUDGET_PROXY_TOKEN lives here, NOT in the
   #     `privileged` env — see SETUP.md Phase 4/5);
-  #   * requires a single-use Telegram HMAC approval token bound to (requestId, amountCents, merchant);
-  #   * relies on the issuer 3DS push to Nick's phone as the final per-charge gate.
+  #   * re-validate each request with the origin/main validator (never the merged-but-attacker-authored
+  #     copy), require a single-use Telegram HMAC approval token bound to (requestId, amount, merchant),
+  #     and rely on the issuer 3DS push to Nick's phone as the final per-charge gate.
   #
   # execute:
   #   needs: validate
