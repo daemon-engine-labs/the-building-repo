@@ -56,15 +56,23 @@ jobs:
             echo "::error::cannot fetch origin/main — refusing to run the spend gate with an unverified validator"
             exit 1
           fi
+          # Prove origin/main actually populated — distinguish "fetch didn't give us main" (a fault →
+          # hard-fail) from "main exists but lacks the validator" (a real bootstrap). Without this,
+          # any git error would fall through to the in-tree branch (Wu: cat-file conflates the two).
+          if ! git rev-parse -q --verify origin/main >/dev/null; then
+            echo "::error::origin/main did not resolve after fetch — refusing to run with an unverified validator"
+            exit 1
+          fi
           if git cat-file -e origin/main:arena/spend-request.mjs 2>/dev/null; then
             git show origin/main:arena/spend-request.mjs > /tmp/validator.mjs
             echo "using TRUSTED validator from origin/main"
           else
-            # origin/main GENUINELY lacks the validator (the fetch succeeded, so this is real absence,
-            # not a blip). Only the bootstrap PR that first adds the file can reach here — after it
-            # merges, origin/main always has the validator and this branch is dead. That PR is
-            # human-reviewed and P0 validation is advisory, so the marginal risk is nil.
-            echo "::warning::bootstrap: origin/main has no arena/spend-request.mjs yet — using the in-tree validator (only the introducing PR can reach this branch)"
+            # origin/main resolved but GENUINELY lacks the validator → real bootstrap. Only a PR that
+            # itself CONTAINS the validator can reach here: `cp` a missing in-tree file hard-fails under
+            # `set -e`, so a concurrent request-only PR (branched from a main without the validator)
+            # fails closed rather than bootstrapping. After the introducing PR merges, this is dead.
+            # That PR is human-reviewed and P0 validation is advisory, so the marginal risk is nil.
+            echo "::warning::bootstrap: origin/main has no arena/spend-request.mjs yet — using the in-tree validator (only a PR that itself adds the validator reaches this; concurrent request-only PRs fail closed)"
             cp arena/spend-request.mjs /tmp/validator.mjs
           fi
           # The gate invokes the validator's EXPLICIT validateFile() export (import + call), NOT the

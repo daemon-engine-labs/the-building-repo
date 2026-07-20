@@ -130,8 +130,10 @@ export function validateSpendRequest(obj, opts = {}) {
   const reasonErr = checkText("reason", obj.reason, 2000);
   if (reasonErr) return refuse(reasonErr);
 
-  if (!Number.isInteger(obj.issue) || obj.issue < 1) {
-    return refuse("issue must be a positive integer (the justifying issue number)");
+  // Number.isSafeInteger, NOT isInteger — the latter accepts 1e21 (a "positive integer" with no upper
+  // bound), and the fail-closed posture is "anything we can't prove in-bounds → refuse."
+  if (!Number.isSafeInteger(obj.issue) || obj.issue < 1) {
+    return refuse("issue must be a positive safe integer (the justifying issue number)");
   }
   if (obj.createdAt !== undefined) {
     if (typeof obj.createdAt !== "string" || !ISO8601_RE.test(obj.createdAt) || Number.isNaN(Date.parse(obj.createdAt))) {
@@ -161,15 +163,25 @@ function findDuplicateKey(text) {
         if (text[j] === '"') break;
         j++;
       }
-      const s = text.slice(i + 1, j);
       let k = j + 1;
       while (k < n && (text[k] === " " || text[k] === "\t" || text[k] === "\n" || text[k] === "\r")) k++;
       // A string immediately followed by ':' inside an object is a KEY (a value string is followed by
       // ',' '}' or ']', never ':').
       if (stack.length > 0 && text[k] === ":") {
+        // DECODE the key exactly as JSON.parse would before comparing — otherwise an escaped twin
+        // (`"amountCents"` vs `"amountCents"`) reads as two distinct raw strings while JSON.parse
+        // collapses them to one key (last-wins). Decoding via JSON.parse of the token is parser-backed
+        // and covers every escape form (\uXXXX, surrogate pairs, \n, \\, …). A key we can't decode is a
+        // structural anomaly → fail closed by reporting it as a "duplicate" (refusal).
+        let key;
+        try {
+          key = JSON.parse(text.slice(i, j + 1));
+        } catch {
+          return text.slice(i, j + 1);
+        }
         const top = stack[stack.length - 1];
-        if (top.has(s)) return s;
-        top.add(s);
+        if (top.has(key)) return key;
+        top.add(key);
       }
       i = j + 1;
       continue;

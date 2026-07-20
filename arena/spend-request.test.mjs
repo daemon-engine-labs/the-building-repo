@@ -77,6 +77,24 @@ test("rejects duplicate JSON keys (human-vs-machine divergence, last-wins)", () 
   assert.equal(validateSpendRequestText(okUrl).ok, true);
 });
 
+test("rejects ESCAPED duplicate keys (the exact cage-match exploit + variants)", () => {
+  // a == 'a'. Raw text differs; JSON.parse decodes both to "amountCents", last-wins = 5, so a
+  // human sees 2000 while the machine acts on 5. The scanner must DECODE keys before comparing.
+  const escExploit = '{"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","\\u0061mountCents":2000,"item":"x","reason":"y","issue":1,"amountCents":5}';
+  const r1 = validateSpendRequestText(escExploit);
+  assert.equal(r1.ok, false, "escaped-twin duplicate must be refused");
+  assert.match(r1.reason, /duplicate/i);
+  // Fully-escaped key spelled entirely in \u escapes, duplicating "issue".
+  const escIssue = '{"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","amountCents":5,"item":"x","reason":"y","\\u0069ssue":9,"issue":1}';
+  assert.equal(validateSpendRequestText(escIssue).ok, false);
+});
+
+test("rejects issue with no safe upper bound (1e21 passes Number.isInteger)", () => {
+  assert.equal(validateSpendRequest({ ...base(), issue: 1e21 }).ok, false);
+  assert.equal(validateSpendRequest({ ...base(), issue: Number.MAX_SAFE_INTEGER + 2 }).ok, false);
+  assert.equal(validateSpendRequest({ ...base(), issue: 42 }).ok, true);
+});
+
 test("validateFile: exit-shaped result on a real file", () => {
   const dir = mkdtempSync(join(tmpdir(), "sr-vf-"));
   const good = join(dir, "abcdefg.json");
