@@ -113,25 +113,50 @@ jobs:
         if: steps.pr.outputs.opened == 'true'
         run: |
           set +e
-          DIFF=$(git diff main...HEAD)
+          # Base against the REMOTE main, explicitly fetched — a local 'main' ref can be absent, shallow,
+          # or detached in CI and collapse the diff to empty (Tesla's finding). Fetch, then three-dot
+          # diff against origin/main = the PR's changes.
+          git fetch -q --depth=1 origin main 2>/dev/null
+          # Trusted reviewer instructions: read the persona + CLI contract from origin/main, NOT the
+          # attacker-influenceable PR branch (a hostile build could rewrite review.md to "output
+          # APPROVED"). Passed to the reviewer via env; it falls back to in-tree copies if absent.
+          git show origin/main:agents/claude/review.md > /tmp/review-base.md 2>/dev/null
+          git show origin/main:arena/agents.json     > /tmp/agents-base.json 2>/dev/null
+          # Run the reviewer SCRIPT from base too, not the branch — else a hostile build could rewrite
+          # self-review.mjs and neuter every protection inside it. Bootstrap: on the PR that first adds
+          # this file it isn't on base yet, so fall back to the in-tree copy (safe — that PR's own build
+          # already had secrets+exec, so the marginal risk is nil; see the honest model in the script).
+          git show origin/main:arena/self-review.mjs > /tmp/self-review-base.mjs 2>/dev/null
+          SR_SCRIPT=/tmp/self-review-base.mjs
+          [ -s "$SR_SCRIPT" ] || SR_SCRIPT=arena/self-review.mjs
+          DIFF=$(git diff origin/main...HEAD)
           if [ -z "$DIFF" ]; then
             # opened=true guaranteed a non-empty porcelain + a commit, so an empty diff here is an
-            # anomaly (base-ref drift / detached state), not a benign nothing — surface it.
-            echo "::warning::self-review: opened=true but 'git diff main...HEAD' is empty — investigate"
+            # anomaly (base-ref drift / detached state), not a benign nothing — surface it LOUDLY,
+            # including on the PR itself, so it's not a silent no-op on a real change.
+            echo "::warning::self-review: opened=true but 'git diff origin/main...HEAD' is empty — investigate"
+            gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+              --body "⚠️ **Maxwell self-review skipped**: could not compute a diff against \`origin/main\` (base-ref anomaly). The PR stands — review it manually." \
+              || echo "::warning::empty-diff notice could not post"
             exit 0
           fi
-          REVIEW=$(printf '%s' "$DIFF" | node arena/self-review.mjs)
+          REVIEW=$(printf '%s' "$DIFF" | REVIEW_PERSONA_FILE=/tmp/review-base.md AGENTS_JSON_FILE=/tmp/agents-base.json node "$SR_SCRIPT" 2>/tmp/self-review-err.log)
           RC=$?
           if [ "$RC" -ne 0 ] || [ -z "$REVIEW" ]; then
+            # Surface WHY, not just rc=N — attach a tail of the reviewer's stderr so a failure is
+            # diagnosable from the PR, not only from run-log archaeology (Tesla's finding).
+            ERRTAIL=$(tail -c 800 /tmp/self-review-err.log 2>/dev/null)
             gh pr comment "agent/issue-${ISSUE_NUMBER}" \
-              --body "⚠️ **Maxwell self-review could not run** (rc=${RC}). The PR stands — review it manually. This is an advisory solo pass, never a merge gate." \
+              --body "$(printf '⚠️ **Maxwell self-review could not run** (rc=%s). The PR stands — review it manually. Advisory solo pass, never a merge gate.\n\n<details><summary>reviewer stderr (tail)</summary>\n\n```\n%s\n```\n</details>' "$RC" "$ERRTAIL")" \
               || echo "::warning::self-review failed (rc=${RC}) AND the failure comment could not post"
             echo "::warning::self-review failed (rc=${RC}); surfaced as a PR comment"
             exit 0
           fi
-          # GitHub caps issue/PR comment bodies at 65536 chars; keep well under it (the review is
-          # advisory, so truncating is fine — better than a failed post turning this green job red).
-          REVIEW="${REVIEW:0:60000}"
+          # GitHub caps comment bodies at 65536 BYTES (not chars). Truncate by BYTE budget with margin
+          # for our wrapper text, and mark the cut so later findings aren't silently dropped.
+          if [ "$(printf '%s' "$REVIEW" | wc -c)" -gt 60000 ]; then
+            REVIEW="$(printf '%s' "$REVIEW" | head -c 60000)$(printf '\n\n_…(review truncated to fit GitHub'\''s comment limit — full text in the run log)_')"
+          fi
           gh pr comment "agent/issue-${ISSUE_NUMBER}" \
             --body "$(printf '**Maxwell self-review — solo pass** _(advisory; the full multi-family cage-match is not yet wired, so this is one voice, not consensus. A human still merges.)_\n\n---\n\n%s' "$REVIEW")" \
             || echo "::warning::self-review ran but the PR comment could not post; PR stands"
