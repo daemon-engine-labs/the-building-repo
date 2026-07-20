@@ -25,7 +25,16 @@ How that's enforced:
 
 ## Status
 
-🚧 **Skeleton — inert.** No runner is attached and no secrets exist yet. The gate (`.github/workflows/triage.yml`) is written but unproven. Nothing privileged can run. Next step: attach a sandbox runner and prove the untrusted path cannot see secrets — *before* a single real token goes in. Cage before monster.
+⚙️ **Proven loop, caged autonomy.** The privileged path is real and has shipped: an issue routed through `triage.yml` → the arena (`arena/run.mjs`) → a PR, first landed in PR #5 (2026-07-04). Runners are attached and launchd-supervised; the `privileged` environment holds real secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `BUDGET_PROXY_TOKEN`).
+
+Two autonomy organs are **built and deliberately caged**:
+
+- **Heartbeat** (`HEARTBEAT.md`) — a daily pulse that recombines the arena's own capabilities into work it *chose* and files its own issue. Caged: its issues are authored by a non-allowlisted bot, so they route to the inert propose path and **cannot trigger a build**. Arming = a bot identity in `allowlist.txt` + a triggering token (its own gated PR).
+- **Budget proxy** (`budget-proxy/`) — a deployed, cap-enforcing spend authorizer (fail-closed, atomic). Caged: no card is loaded and `spend` is `deny` for every agent. Arming = a real card behind an issuer-side limit + a `/cage-match`.
+
+Still **unbuilt**: the multi-rival cage-match as a CI stage (only `claude` is `installed:true` — codex/gemini/grok are stubs), and the untrusted *propose* path (stubbed in `triage.yml`). The loop builds; it doesn't yet competitively select in CI.
+
+The invariant holds throughout: everything dangerous is one deliberate, human-merged step from live. Cage before monster.
 
 ## Layout
 
