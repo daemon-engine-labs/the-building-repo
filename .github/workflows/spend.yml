@@ -1,0 +1,77 @@
+name: spend
+
+# The Rail-B (card-present) gate. PHASE P0: validate-only, inert. No secrets, no executor, no card.
+#
+# A build agent's only spend affordance is to write arena/spend-requests/<id>.json (pure data) on its
+# PR branch. This workflow validates that data fail-closed. Money movement (the `execute` job below)
+# is DELIBERATELY not wired yet — it lands in a later, /cage-match-gated phase behind the spend-approval
+# environment, the Telegram approval token, and the issuer 3DS gate. See arena/spend-requests/README.md.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "arena/spend-requests/**"
+      - "arena/spend-request.mjs"
+      - "arena/spend-request.schema.json"
+
+# Default-deny. Validation reads the repo and needs nothing else.
+permissions:
+  contents: read
+
+jobs:
+  # ── VALIDATE ────────────────────────────────────────────────────────────────────
+  # Runs on GitHub-HOSTED ubuntu-latest, NOT a self-hosted runner. This is deliberate:
+  # a pull_request from a fork checks out ATTACKER-AUTHORED code (including spend-request.mjs
+  # itself), so it must run on a disposable, zero-secret VM — never on the self-hosted box that
+  # holds real credentials. (This is the same fork-RCE class triage.yml avoids via `on: issues`.)
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: validate every spend-request (fail closed)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          reqs=(arena/spend-requests/*.json)
+          if [ ${#reqs[@]} -eq 0 ]; then
+            echo "No spend-request files present — nothing to validate."
+            exit 0
+          fi
+          rc=0
+          for f in "${reqs[@]}"; do
+            echo "── validating $f"
+            # The validator asserts the filename stem == requestId and refuses on any deviation.
+            if ! node arena/spend-request.mjs "$f"; then
+              echo "::error file=$f::spend-request failed validation"
+              rc=1
+            fi
+          done
+          exit $rc
+
+  # ── EXECUTE (INERT — not wired until a later phase) ──────────────────────────────
+  # The single door that will move money. It is intentionally commented out in P0. When it is built:
+  #   * runs on a SEPARATE principal (the budget-proxy Worker + a card-executor outside the runner),
+  #     never in the general build agent's environment;
+  #   * declares `environment: spend-approval` so it PAUSES for Nick's required-reviewer click and
+  #     is the ONLY workflow that may read the spend token (BUDGET_PROXY_TOKEN lives here, NOT in the
+  #     `privileged` env — see SETUP.md Phase 4/5);
+  #   * requires a single-use Telegram HMAC approval token bound to (requestId, amountCents, merchant);
+  #   * relies on the issuer 3DS push to Nick's phone as the final per-charge gate.
+  #
+  # execute:
+  #   needs: validate
+  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  #   runs-on: [self-hosted, spend]
+  #   environment: spend-approval          # required reviewer = Nick; the pause is a feature
+  #   permissions:
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: request approval + move money through the single door
+  #       env:
+  #         BUDGET_PROXY_TOKEN: ${{ secrets.BUDGET_PROXY_TOKEN }}   # ONLY here, never in privileged
+  #       run: node spend/executor/redeem.mjs   # authorizes, escalates to Telegram, redeems 1-use token

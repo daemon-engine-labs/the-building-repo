@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://daemon-engine-labs.github.io/schemas/spend-request.schema.json",
+  "title": "arena spend-request (Rail B — card-present)",
+  "_doc": [
+    "A spend-request is the ONLY way a build agent can express a card-present purchase.",
+    "It is PURE DATA the agent writes into arena/spend-requests/<requestId>.json on its PR branch —",
+    "never an action. The agent holds no card and no spend token; its maximum power here is 'author a",
+    "wish'. The wish then faces four independent gates before any money moves: (1) code-owner merge",
+    "of this file, (2) the spend-approval GitHub Environment reviewer, (3) a single-use Telegram HMAC",
+    "approval token bound to (requestId, amountCents, merchant), (4) the issuer 3DS push to Nick's",
+    "phone. See arena/spend-requests/README.md and the plan (the Spend Cage).",
+    "",
+    "THIS FILE IS DOCUMENTATION. The ENFORCING source of truth is arena/spend-request.mjs, which",
+    "validates fail-closed (any deviation => refuse). Keep the two in sync; when they disagree, the",
+    "validator wins."
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "requestId", "merchant", "amountCents", "item", "reason", "issue"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Bump when the shape changes; the validator refuses any other value."
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{6,63}$",
+      "description": "Globally-unique id for this purchase. Binds the capability/approval token so approving request A can never authorize charge B. Must match the filename stem."
+    },
+    "merchant": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9.-]{1,98}[a-z0-9])$",
+      "description": "The merchant host/label the charge targets. Re-checked against the allowlist at the Worker (the single door); an API-credit host is refused HERE too (defence in depth) because 'never buy API credits' is a structural rule, not agent judgment."
+    },
+    "amountCents": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000,
+      "description": "Positive integer cents, never above the $20 lifetime cap. The Worker re-authorizes against the live atomic counter; this bound is a cheap first fail-closed."
+    },
+    "item": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "Human-readable description of what is being bought — shown to Nick at every approval gate."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "Why the build needs this purchase. Shown to Nick at approval time."
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The issue number this spend serves — traceability from money back to a justifying build task."
+    },
+    "createdAt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "description": "Optional ISO-8601 timestamp, informational only."
+    }
+  }
+}

@@ -199,11 +199,18 @@ Create a GitHub **Environment** named `privileged`
 gh secret set ANTHROPIC_OAUTH --env privileged --repo daemon-engine-labs/the-building-repo
 gh secret set OPENAI_API_KEY  --env privileged --repo daemon-engine-labs/the-building-repo
 gh secret set GEMINI_API_KEY  --env privileged --repo daemon-engine-labs/the-building-repo
-gh secret set BUDGET_PROXY_TOKEN --env privileged --repo daemon-engine-labs/the-building-repo
 ```
 
-> **The real card NEVER goes here.** Only the budget-proxy *token* does (Phase 5). Even fully
-> compromised, this set spends at most the proxy's daily cap and burns OAuth tokens you can rotate.
+> **NO spend token, NO card here — reversed from an earlier draft.** An earlier version of this phase
+> put `BUDGET_PROXY_TOKEN` in the `privileged` environment. That was the vulnerability: the privileged
+> build agent runs with `--dangerously-skip-permissions` on a runner with direct egress, and folds
+> attacker-influenceable issue text into its prompt — so *any* spendable credential in its env is a
+> credential a prompt injection can wield (and `deny:["spend"]` in `tools.json` enforces nothing —
+> nothing reads it). The spend token therefore lives ONLY in the separate **`spend-approval`**
+> environment used by `spend.yml`, never here. See Phase 5 and `arena/spend-requests/README.md`.
+>
+> Even so, this set is contained: an OAuth/provider token, if leaked, burns compute you can rotate —
+> it moves no money.
 
 **Check:** re-run the dummy-secret test from Phase 2 against the **sandbox** path — the env secrets
 must remain invisible there (they're scoped to the `privileged` environment). Sandbox stays empty.
@@ -211,14 +218,28 @@ must remain invisible there (they're scoped to the `privileged` environment). Sa
 </details>
 
 <details>
-<summary><b>Phase 5 — Budget proxy (so the card is never in the repo)</b></summary>
+<summary><b>Phase 5 — The Spend Cage (so a card is never in the repo, nor reachable by an injected agent)</b></summary>
 
-A tiny service you host that holds the real card, enforces a hard daily cap, and only honours
-authenticated, rate-limited calls bearing `BUDGET_PROXY_TOKEN`. The repo gets the token; the PAN
-stays with you. (Built later — tracked as its own task.)
+The budget-proxy Worker (deployed) is a pure **authorizer**: `POST /authorize {amountCents}` →
+approve/refuse against an atomic $20 lifetime cap. It holds no card and moves no money. Arming real
+spend is a deliberate, phased, `/cage-match`-gated build — the **Spend Cage** — whose one rule is:
+*the spendable credential never lives in the general build agent's hands.* Spend is mediated so the
+agent can only **request** a purchase (as data), never wield a card:
 
-**Check:** an agent can request a charge up to the cap and is refused past it; the repo contains no
-card data anywhere.
+- **Rail A (autonomous, no card):** pre-funded merchant balances (e.g. 2captcha) the Worker draws down
+  via API. Blast radius = the prepaid balance ≤ cap. This is the "hire a human to solve a CAPTCHA" path.
+- **Rail B (card-present, buy anything):** the agent writes `arena/spend-requests/<id>.json` (pure
+  data). It faces four gates before money moves — code-owner merge, the `spend-approval` environment
+  reviewer, a single-use Telegram HMAC approval token bound to `(requestId, amount, merchant)`, and the
+  issuer 3DS push to your phone. A separate card-executor (outside the runner) holds the PAN and
+  redeems a one-use capability token; the Worker never holds the card, the agent never sees it.
+- **Hard cap:** a *dedicated* bank account funded to ~$20 (max loss = balance, issuer-enforced),
+  layered with the proxy's atomic counter.
+- **"Never buy API credits"** is a merchant denylist enforced at the Worker AND at request-validation.
+
+**Check:** a merged spend-request does nothing until the executor phase is live; an injected agent can
+at most *propose* a ≤$20 purchase you consciously approve four times; the repo contains no card data.
+Tracked phase-by-phase in the plan (the Spend Cage); live card lands last.
 
 </details>
 

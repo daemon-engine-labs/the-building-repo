@@ -1,5 +1,16 @@
 {
-  "_comment": "Declared tool surface this agent may use. Enforced via the CLI's own permission config at invocation; this file is the source of truth an agent edits (by PR) to request more.",
-  "allow": ["read", "write", "edit", "bash", "git"],
-  "deny": ["secrets", "deploy", "publish", "spend"]
+  "_comment": "DECLARATIVE ONLY — NOT a runtime enforcement site. Nothing reads this file: arena/run.mjs never loads it and the agent CLIs run with --dangerously-skip-permissions/--yolo, so allow/deny are DOCUMENTATION of intent, not a gate. In particular deny:[\"spend\"] enforces nothing on its own. Real spend safety = token-absence (no spend credential in the agent env) + the Spend Cage (arena/spend-requests/README.md, SETUP.md Phase 5). This file remains the thing an agent edits (by PR) to REQUEST more; the merge is the door.",
+  "allow": [
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "git"
+  ],
+  "deny": [
+    "secrets",
+    "deploy",
+    "publish",
+    "spend"
+  ]
 }
