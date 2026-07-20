@@ -14,7 +14,7 @@ import { writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateSpendRequest, validateSpendRequestText, MAX_INPUT_BYTES } from "./spend-request.mjs";
+import { validateSpendRequest, validateSpendRequestText, validateFile, MAX_INPUT_BYTES } from "./spend-request.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "spend-request.mjs");
@@ -58,11 +58,34 @@ test("rejects unknown field (strict shape)", () => {
   assert.equal(validateSpendRequest({ ...base(), spend: true }).ok, false);
 });
 
-test("rejects prototype-pollution keys", () => {
-  for (const t of ['{"__proto__":{"x":1}}', '{"constructor":1}']) {
-    const merged = JSON.stringify({ ...base(), ...JSON.parse(t) });
-    assert.equal(validateSpendRequestText(merged).ok, false, `${t} should refuse`);
-  }
+test("rejects prototype-pollution keys (raw JSON text, not spread)", () => {
+  // Assert on RAW malicious JSON so the object shape isn't laundered through a spread (Wu's note).
+  const rawWithProto = '{"__proto__":{"x":1},"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","amountCents":5,"item":"x","reason":"y","issue":1}';
+  assert.equal(validateSpendRequestText(rawWithProto).ok, false);
+  const rawWithCtor = '{"constructor":{"y":1},"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","amountCents":5,"item":"x","reason":"y","issue":1}';
+  assert.equal(validateSpendRequestText(rawWithCtor).ok, false);
+});
+
+test("rejects duplicate JSON keys (human-vs-machine divergence, last-wins)", () => {
+  // The diff a human approves shows amountCents:5; JSON.parse silently acts on 999999. Refuse.
+  const dup = '{"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","amountCents":5,"item":"x","reason":"y","issue":1,"amountCents":999999}';
+  const r = validateSpendRequestText(dup);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /duplicate/i);
+  // A URL-ish value containing ':' must NOT be mistaken for a duplicate key.
+  const okUrl = '{"schemaVersion":1,"requestId":"abcdefg","merchant":"2captcha.com","amountCents":5,"item":"see https://x.example","reason":"y","issue":1}';
+  assert.equal(validateSpendRequestText(okUrl).ok, true);
+});
+
+test("validateFile: exit-shaped result on a real file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sr-vf-"));
+  const good = join(dir, "abcdefg.json");
+  writeFileSync(good, JSON.stringify({ ...base(), requestId: "abcdefg" }));
+  assert.equal(validateFile(good).ok, true);
+  const bad = join(dir, "abcdefg2.json");
+  writeFileSync(bad, JSON.stringify({ ...base(), requestId: "abcdefg2", merchant: "api.openai.com" }));
+  assert.equal(validateFile(bad).ok, false);
+  assert.equal(validateFile(join(dir, "does-not-exist.json")).ok, false); // missing file → refuse
 });
 
 test("rejects API-credit merchants (broad denylist)", () => {

@@ -48,32 +48,51 @@ jobs:
       - name: pin the trusted validator from origin/main
         run: |
           set -euo pipefail
-          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' || echo "::warning::base fetch failed"
-          if git show origin/main:arena/spend-request.mjs > /tmp/validator.mjs 2>/dev/null && [ -s /tmp/validator.mjs ]; then
+          # A fetch FAILURE is not a trust-safe state. HARD-FAIL rather than fall back to PR-authored
+          # code on a network blip — a transient failure must never silently swap the judge for the
+          # judged (a cage-match caught this: fetch blip + a PR-tailored validator = the pin is
+          # theatre). Only a fetch that SUCCEEDS but finds no validator on main is a real bootstrap.
+          if ! git fetch -q origin '+refs/heads/main:refs/remotes/origin/main'; then
+            echo "::error::cannot fetch origin/main — refusing to run the spend gate with an unverified validator"
+            exit 1
+          fi
+          if git cat-file -e origin/main:arena/spend-request.mjs 2>/dev/null; then
+            git show origin/main:arena/spend-request.mjs > /tmp/validator.mjs
             echo "using TRUSTED validator from origin/main"
           else
-            # Bootstrap: the PR that FIRST adds the validator has no base copy. Fall back to the
-            # in-tree one and SAY SO — that PR is human-reviewed and P0 validation is advisory, so the
-            # marginal risk is nil. Every subsequent PR gets the trusted base validator.
-            echo "::warning::origin/main has no arena/spend-request.mjs yet (bootstrap PR) — using the in-tree validator; advisory only"
+            # origin/main GENUINELY lacks the validator (the fetch succeeded, so this is real absence,
+            # not a blip). Only the bootstrap PR that first adds the file can reach here — after it
+            # merges, origin/main always has the validator and this branch is dead. That PR is
+            # human-reviewed and P0 validation is advisory, so the marginal risk is nil.
+            echo "::warning::bootstrap: origin/main has no arena/spend-request.mjs yet — using the in-tree validator (only the introducing PR can reach this branch)"
             cp arena/spend-request.mjs /tmp/validator.mjs
           fi
+          # The gate invokes the validator's EXPLICIT validateFile() export (import + call), NOT the
+          # self-detecting CLI. This removes the gate's dependence on entrypoint heuristics entirely —
+          # a realpath/ENOENT edge in the CLI's "am I main?" check can never turn the gate into a no-op.
+          cat > /tmp/validate-one.mjs <<'JS'
+          import { validateFile } from "/tmp/validator.mjs";
+          const r = validateFile(process.argv[2]);
+          if (!r.ok) { console.error("REFUSED: " + r.reason); process.exit(1); }
+          console.error("OK: " + process.argv[2]);
+          process.exit(0);
+          JS
 
-      # Prove the gate actually refuses, on the EXACT `node <validator> <file>` command line CI uses on
-      # real requests. A known-BAD fixture MUST exit 1; a known-GOOD MUST exit 0. This converts "the
-      # validator probably runs" into "CI fails if it ever silently no-ops" — the self-referential-
-      # test-blindness class (an imported-function test that never exercises the CLI wire) cannot hide
-      # a dead entrypoint here.
-      - name: self-test the gate (fail-closed proof on the real CLI)
+      # Prove the gate actually refuses, on the EXACT invocation CI uses on real requests. A known-BAD
+      # fixture MUST exit 1; a known-GOOD MUST exit 0. This converts "the validator probably runs" into
+      # "CI fails if it ever silently no-ops" — the self-referential-test-blindness class cannot hide a
+      # dead gate here. (Note: this proves the wire is alive; the trusted-pin above proves the wire runs
+      # MAIN's validator, and CODEOWNERS on /arena/ is the ultimate backstop against a swapped judge.)
+      - name: self-test the gate (fail-closed proof via validateFile)
         run: |
           set -euo pipefail
           d=$(mktemp -d)
           printf '%s' '{"schemaVersion":1,"requestId":"selftest-good","merchant":"2captcha.com","amountCents":50,"item":"selftest","reason":"selftest","issue":1}' > "$d/selftest-good.json"
           printf '%s' '{"schemaVersion":1,"requestId":"selftest-bad","merchant":"api.openai.com","amountCents":999999,"item":"x","reason":"y","issue":1}' > "$d/selftest-bad.json"
-          if ! node /tmp/validator.mjs "$d/selftest-good.json"; then
+          if ! node /tmp/validate-one.mjs "$d/selftest-good.json"; then
             echo "::error::GATE SELF-TEST FAILED: a valid request was refused — the validator is broken"; exit 1
           fi
-          if node /tmp/validator.mjs "$d/selftest-bad.json"; then
+          if node /tmp/validate-one.mjs "$d/selftest-bad.json"; then
             echo "::error::GATE SELF-TEST FAILED: a KNOWN-BAD request passed (exit 0) — the gate is fail-OPEN"; exit 1
           fi
           echo "gate self-test passed: good→exit0, bad→exit1"
@@ -100,8 +119,9 @@ jobs:
               rc=1
               continue
             fi
-            # Trusted validator (origin/main) over untrusted data; it asserts filename stem == requestId.
-            if ! node /tmp/validator.mjs "$f"; then
+            # Trusted validator (origin/main) over untrusted data, via the explicit validateFile
+            # entrypoint (not the self-detecting CLI); it asserts filename stem == requestId.
+            if ! node /tmp/validate-one.mjs "$f"; then
               echo "::error file=$f::spend-request failed validation"
               rc=1
             fi
@@ -118,9 +138,13 @@ jobs:
   #   * declare `environment: spend-approval` so it PAUSES for Nick's required-reviewer click and is
   #     the ONLY workflow that may read the spend token (BUDGET_PROXY_TOKEN lives here, NOT in the
   #     `privileged` env — see SETUP.md Phase 4/5);
-  #   * re-validate each request with the origin/main validator (never the merged-but-attacker-authored
-  #     copy), require a single-use Telegram HMAC approval token bound to (requestId, amount, merchant),
-  #     and rely on the issuer 3DS push to Nick's phone as the final per-charge gate.
+  #   * re-validate each request with a validator pinned to a REVIEWED base commit — NOT bare
+  #     origin/main, because on push-to-main origin/main IS the just-merged (attacker-influenced) code;
+  #     pin to the pre-merge base SHA, a protected release tag, or an external verifier;
+  #   * require a single-use Telegram HMAC approval token bound to (requestId, amount, merchant), and
+  #     rely on the issuer 3DS push to Nick's phone as the final per-charge gate;
+  #   * enforce a Worker-side LIFETIME counter — the per-request cap here is not a budget, so a
+  #     multi-file / replay burst must be bounded by the atomic Durable Object, not by N human clicks.
   #
   # execute:
   #   needs: validate

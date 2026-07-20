@@ -45,13 +45,13 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 500,
-      "description": "Human-readable description of what is being bought — shown to Nick at every approval gate."
+      "description": "Human-readable description of what is being bought — shown to Nick at every approval gate. The validator ADDITIONALLY rejects leading/trailing-only whitespace and any control or bidirectional-override characters (display-injection at the human gate); JSON Schema can't express that, so the validator is authoritative."
     },
     "reason": {
       "type": "string",
       "minLength": 1,
       "maxLength": 2000,
-      "description": "Why the build needs this purchase. Shown to Nick at approval time."
+      "description": "Why the build needs this purchase. Shown to Nick at approval time. Same control/bidi-character rejection as item — the validator is authoritative over this schema."
     },
     "issue": {
       "type": "integer",

@@ -142,12 +142,55 @@ export function validateSpendRequest(obj, opts = {}) {
   return { ok: true, reason: "", value: obj };
 }
 
-// validateSpendRequestText(text, opts) — size-check, parse, then validate. Every step fails closed.
+// findDuplicateKey(text) — string-aware scan for a key that appears twice at the same object level.
+// JSON.parse silently keeps LAST-WINS on duplicate keys, so `{"amountCents":5,"amountCents":9999}`
+// parses to 9999 while a human reviewing the diff sees both — the document approved and the document
+// acted on diverge. At a money gate that is unacceptable. Returns the offending key, or null. This is
+// an ADDITIONAL guard layered before JSON.parse, not a parser; on any structural oddity it returns
+// null and lets the normal validator reject the shape.
+function findDuplicateKey(text) {
+  const stack = []; // one Set of seen keys per object nesting level
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === "\\") { j += 2; continue; } // skip escaped char
+        if (text[j] === '"') break;
+        j++;
+      }
+      const s = text.slice(i + 1, j);
+      let k = j + 1;
+      while (k < n && (text[k] === " " || text[k] === "\t" || text[k] === "\n" || text[k] === "\r")) k++;
+      // A string immediately followed by ':' inside an object is a KEY (a value string is followed by
+      // ',' '}' or ']', never ':').
+      if (stack.length > 0 && text[k] === ":") {
+        const top = stack[stack.length - 1];
+        if (top.has(s)) return s;
+        top.add(s);
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "{") stack.push(new Set());
+    else if (c === "}") stack.pop();
+    i++;
+  }
+  return null;
+}
+
+// validateSpendRequestText(text, opts) — size-check, dup-key check, parse, then validate. Fails closed.
 export function validateSpendRequestText(text, opts = {}) {
   if (typeof text !== "string") return refuse("input is not text");
   // Byte length (not char count) — a multibyte payload must be capped by what it actually weighs.
   if (Buffer.byteLength(text, "utf8") > MAX_INPUT_BYTES) {
     return refuse(`input exceeds ${MAX_INPUT_BYTES} bytes — refusing before parse`);
+  }
+  const dup = findDuplicateKey(text);
+  if (dup !== null) {
+    return refuse(`duplicate JSON key "${dup}" — the reviewed document and the parsed object would differ (last-wins)`);
   }
   let parsed;
   try {
@@ -156,6 +199,29 @@ export function validateSpendRequestText(text, opts = {}) {
     return refuse(`unparseable JSON: ${e.message}`);
   }
   return validateSpendRequest(parsed, opts);
+}
+
+// validateFile(path) — the SECURITY ENTRYPOINT the CI gate calls EXPLICITLY (import + call), so the
+// gate never depends on the CLI's self-detection heuristic (a prior fail-open class). Size-checks the
+// file on disk before reading, then validates with the filename-stem binding. Returns { ok, reason }.
+export function validateFile(path) {
+  let bytes;
+  try {
+    bytes = statSync(path).size;
+  } catch (e) {
+    return refuse(`cannot stat ${path}: ${e.message}`);
+  }
+  if (bytes > MAX_INPUT_BYTES) {
+    return refuse(`file is ${bytes} bytes (> ${MAX_INPUT_BYTES}) — refusing before read`);
+  }
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    return refuse(`cannot read ${path}: ${e.message}`);
+  }
+  const stem = basename(path).replace(/\.json$/i, "");
+  return validateSpendRequestText(text, { filenameStem: stem });
 }
 
 // --- CLI ----------------------------------------------------------------------------------
@@ -178,26 +244,23 @@ function invokedDirectlyCheck() {
 const invokedDirectly = invokedDirectlyCheck();
 if (invokedDirectly) {
   const path = process.argv[2];
-  let text, stem;
-  try {
-    if (path) {
-      // Refuse oversized files by their on-disk size BEFORE reading them into memory — the read
-      // itself is the OOM risk, so the size gate must precede it.
-      const bytes = statSync(path).size;
-      if (bytes > MAX_INPUT_BYTES) {
-        console.error(`REFUSED: file is ${bytes} bytes (> ${MAX_INPUT_BYTES}) — refusing before read`);
-        process.exit(1);
-      }
-      text = readFileSync(path, "utf8");
-      stem = basename(path).replace(/\.json$/i, "");
-    } else {
-      text = readFileSync(0, "utf8"); // stdin (CI always passes a path; stdin is for local use)
+  let res;
+  if (path) {
+    // File mode — the CI-shaped path. validateFile() is also what the gate calls directly, so the CLI
+    // and the gate exercise the identical code (no drift between "what CI runs" and "what's tested").
+    res = validateFile(path);
+  } else {
+    // stdin — local dev only (CI always passes a path). Size is still enforced inside
+    // validateSpendRequestText after buffering; do not wire stdin into any money path.
+    let text;
+    try {
+      text = readFileSync(0, "utf8");
+    } catch (e) {
+      console.error(`REFUSED: cannot read stdin: ${e.message}`);
+      process.exit(1);
     }
-  } catch (e) {
-    console.error(`spend-request: cannot read input: ${e.message}`);
-    process.exit(1);
+    res = validateSpendRequestText(text);
   }
-  const res = validateSpendRequestText(text, stem !== undefined ? { filenameStem: stem } : {});
   if (!res.ok) {
     console.error(`REFUSED: ${res.reason}`);
     process.exit(1);
