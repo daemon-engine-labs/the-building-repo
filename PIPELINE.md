@@ -5,10 +5,16 @@ skills, ported from interactive (you-plus-Claude) to autonomous (agents on the r
 builds the way its author thinks: **generate alive → forge → adversarially sort → distill the lesson.**
 
 ```
-   issue  ──▶  ① ASCEND ──▶  ② FORGE ──▶  ③ CAGE-MATCH ──▶  ④ SPIRAL ──▶  merge (you)
-   (wish)      heat in        work          demon sorts        heat out
-              /ascend        3 rivals       /cage-match        /spiral-review
+   heartbeat ─▶ issue  ──▶  ① ASCEND ──▶  ② FORGE ──▶  ③ CAGE-MATCH ──▶  ④ SPIRAL ──▶  merge (you)
+   (self-fed)   (wish)      heat in        work          demon sorts        heat out
+   /recombine               /ascend        3 rivals       /cage-match        /spiral-review
 ```
+
+The issue is usually a human's wish — but it need not be. The **heartbeat** (`HEARTBEAT.md`) is the
+arena's generative source: a daily pulse that runs `/recombine` over the arena's own capabilities and
+files its own issue, so the cycle can turn without being fed. It's caged by default (its issues can't
+trigger a build until a bot identity is added to `allowlist.txt`), which is why it's drawn dashed —
+present, disarmed, one deliberate merge away from beating.
 
 | # | Phase | Skill | Thermo | What runs |
 |---|---|---|---|---|

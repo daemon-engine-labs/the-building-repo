@@ -1,0 +1,99 @@
+name: heartbeat
+
+# The arena's pulse. Where triage.yml is REACTIVE (a human files an issue), this is GENERATIVE:
+# once a day the arena recombines its own capabilities + backlog + org repos into work it *chose*,
+# tempers the design, and files one issue for itself. See arena/heartbeat.mjs + HEARTBEAT.md.
+#
+# CAGED BY DEFAULT. The pulse files issues authored by the default github-actions[bot] token, which
+# is NOT in allowlist.txt — so triage.yml routes them to the inert propose path and NO privileged
+# build fires. The pulse is fully visible but disarmed. Arming it is a deliberate, separate act
+# (add a bot identity to allowlist.txt + file with a non-default token). Do not arm it here.
+
+on:
+  schedule:
+    - cron: '0 2 * * *'          # daily, ~noon AEST — slow on purpose; each issue is a full build
+  workflow_dispatch:              # manual pulse, for proving it works on demand
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false       # never cancel a beating heart
+
+# Least privilege. Read the repo; write issues (the pulse's only output + the failure alert).
+# No contents:write, no pull-requests:write — the heartbeat proposes, it never builds or merges.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    # The OAuth token lives behind the `privileged` environment (protection_rules: [] — a scheduled
+    # run reaches it without hanging on approval). The pulse only THINKS + files an issue here; it
+    # never touches the Docker sandbox or a real build, so a GitHub-hosted runner is correct.
+    environment: privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Feel the pulse
+        env:
+          # gh authors the self-filed issue as github-actions[bot] — the caged, non-allowlisted
+          # identity. This is the disarm: its issues cannot trigger a privileged build.
+          GH_TOKEN: ${{ github.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node arena/heartbeat.mjs
+
+      - name: Whisper on failure
+        # A silent dead pulse is the worst outcome — the arena can't tell anyone it stopped choosing.
+        # Dedupe: first failure since recovery opens a labeled alert issue; repeats append a comment.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALERT_LABEL: alert-heartbeat
+        run: |
+          set -euo pipefail
+          gh label create "$ALERT_LABEL" --repo "$REPO" --color B60205 \
+            --description "Open while the heartbeat is failing; close when resolved" --force >/dev/null 2>&1 || true
+          set +e
+          EXISTING=$(gh issue list --repo "$REPO" --state open --label "$ALERT_LABEL" \
+            --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null)
+          set -e
+          if [ -n "${EXISTING:-}" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body "Still failing: ${RUN_URL}" >/dev/null 2>&1 \
+              || echo "::warning::could not append to alert #${EXISTING}"
+            echo "alert #${EXISTING} updated (dedupe)."
+          else
+            gh issue create --repo "$REPO" --title "heartbeat is failing" --label "$ALERT_LABEL" \
+              --body "The arena's heartbeat failed. First failed run: ${RUN_URL}
+
+          Close this issue when resolved; repeat failures append here without opening new issues." \
+              >/dev/null 2>&1 || echo "::warning::could not open alert issue"
+          fi
+
+      - name: Resolve alert on recovery
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALERT_LABEL: alert-heartbeat
+        run: |
+          set -euo pipefail
+          set +e
+          OPEN=$(gh issue list --repo "$REPO" --state open --label "$ALERT_LABEL" \
+            --limit 10 --json number --jq '.[].number' 2>/dev/null)
+          set -e
+          for N in ${OPEN:-}; do
+            gh issue close "$N" --repo "$REPO" \
+              --comment "✅ Heartbeat recovered at ${RUN_URL}. Auto-closing." \
+              || echo "::warning::could not close alert #${N}"
+          done
