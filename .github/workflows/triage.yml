@@ -113,39 +113,41 @@ jobs:
         if: steps.pr.outputs.opened == 'true'
         run: |
           set +e
-          # Base against the REMOTE main, explicitly fetched — a local 'main' ref can be absent, shallow,
-          # or detached in CI and collapse the diff to empty (Tesla's finding). Fetch, then three-dot
-          # diff against origin/main = the PR's changes.
-          git fetch -q --depth=1 origin main 2>/dev/null
-          # Trusted reviewer instructions: read the persona + CLI contract from origin/main, NOT the
-          # attacker-influenceable PR branch (a hostile build could rewrite review.md to "output
-          # APPROVED"). Passed to the reviewer via env; it falls back to in-tree copies if absent.
+          ERR_LOG=$(mktemp)   # per-run, not a static path — no cross-step trampling (Kelvin's finding)
+          # Base against the REMOTE main with an EXPLICIT refspec — `git fetch origin main` alone may only
+          # populate FETCH_HEAD on some git versions, leaving origin/main stale/absent (Carnot's finding).
+          # Fetch stderr is kept (not swallowed) so a real fetch failure is visible in the run log.
+          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' || echo "::warning::base fetch failed — diff/persona may be stale"
+          # Trusted reviewer instructions: read persona + CLI contract + the reviewer SCRIPT itself from
+          # origin/main, NOT the attacker-influenceable PR branch (a hostile build could rewrite review.md
+          # to "output APPROVED" or neuter self-review.mjs). self-review.mjs FAILS CLOSED on an empty
+          # persona/contract, so a failed `git show` refuses the review rather than reviewing blind.
           git show origin/main:agents/claude/review.md > /tmp/review-base.md 2>/dev/null
           git show origin/main:arena/agents.json     > /tmp/agents-base.json 2>/dev/null
-          # Run the reviewer SCRIPT from base too, not the branch — else a hostile build could rewrite
-          # self-review.mjs and neuter every protection inside it. Bootstrap: on the PR that first adds
-          # this file it isn't on base yet, so fall back to the in-tree copy (safe — that PR's own build
-          # already had secrets+exec, so the marginal risk is nil; see the honest model in the script).
+          # Bootstrap: on the PR that first adds self-review.mjs it isn't on base yet, so fall back to the
+          # in-tree copy (safe — that PR's own build already had secrets+exec, so marginal risk is nil).
           git show origin/main:arena/self-review.mjs > /tmp/self-review-base.mjs 2>/dev/null
           SR_SCRIPT=/tmp/self-review-base.mjs
           [ -s "$SR_SCRIPT" ] || SR_SCRIPT=arena/self-review.mjs
-          DIFF=$(git diff origin/main...HEAD)
-          if [ -z "$DIFF" ]; then
+          # BOUND the diff in the workflow BEFORE it becomes a shell var — `head -c` streams and caps at
+          # 300KB, so a hostile huge diff can't OOM the runner before the Node-side cap ever applies
+          # (Carnot+Tesla consensus: the cap must be on the JOB, not just the model input).
+          git diff origin/main...HEAD | head -c 300000 > /tmp/pr-review-diff.txt
+          if [ ! -s /tmp/pr-review-diff.txt ]; then
             # opened=true guaranteed a non-empty porcelain + a commit, so an empty diff here is an
-            # anomaly (base-ref drift / detached state), not a benign nothing — surface it LOUDLY,
-            # including on the PR itself, so it's not a silent no-op on a real change.
-            echo "::warning::self-review: opened=true but 'git diff origin/main...HEAD' is empty — investigate"
+            # anomaly (base-ref drift / detached state), not a benign nothing — surface it LOUDLY.
+            echo "::warning::self-review: opened=true but the diff vs origin/main is empty — investigate"
             gh pr comment "agent/issue-${ISSUE_NUMBER}" \
               --body "⚠️ **Maxwell self-review skipped**: could not compute a diff against \`origin/main\` (base-ref anomaly). The PR stands — review it manually." \
               || echo "::warning::empty-diff notice could not post"
             exit 0
           fi
-          REVIEW=$(printf '%s' "$DIFF" | REVIEW_PERSONA_FILE=/tmp/review-base.md AGENTS_JSON_FILE=/tmp/agents-base.json node "$SR_SCRIPT" 2>/tmp/self-review-err.log)
+          REVIEW=$(REVIEW_PERSONA_FILE=/tmp/review-base.md AGENTS_JSON_FILE=/tmp/agents-base.json node "$SR_SCRIPT" < /tmp/pr-review-diff.txt 2>"$ERR_LOG")
           RC=$?
           if [ "$RC" -ne 0 ] || [ -z "$REVIEW" ]; then
             # Surface WHY, not just rc=N — attach a tail of the reviewer's stderr so a failure is
             # diagnosable from the PR, not only from run-log archaeology (Tesla's finding).
-            ERRTAIL=$(tail -c 800 /tmp/self-review-err.log 2>/dev/null)
+            ERRTAIL=$(tail -c 800 "$ERR_LOG" 2>/dev/null)
             gh pr comment "agent/issue-${ISSUE_NUMBER}" \
               --body "$(printf '⚠️ **Maxwell self-review could not run** (rc=%s). The PR stands — review it manually. Advisory solo pass, never a merge gate.\n\n<details><summary>reviewer stderr (tail)</summary>\n\n```\n%s\n```\n</details>' "$RC" "$ERRTAIL")" \
               || echo "::warning::self-review failed (rc=${RC}) AND the failure comment could not post"

@@ -97,6 +97,13 @@ try {
   console.error(`[self-review] review persona missing (${personaPath}) — refusing to review blind`);
   process.exit(3);
 }
+// FAIL CLOSED on an EMPTY persona, symmetric with the script's [ -s ] guard: a failed trusted-base
+// `git show` yields a present-but-empty file, and reviewing with an empty lens + the full attacker
+// diff is the cosplay-isolation failure this design exists to kill — refuse, don't review blind.
+if (!reviewPersona.trim()) {
+  console.error(`[self-review] review persona (${personaPath}) is empty — refusing to review blind (fail closed)`);
+  process.exit(3);
+}
 
 const taskPrompt = [
   agent.personaArg ? "" : reviewPersona, // fold persona into prompt when the CLI has no dedicated flag
