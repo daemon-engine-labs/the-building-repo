@@ -1,0 +1,12 @@
+{
+  "name": "arena-budget-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capped authorization proxy for the arena — agents can spend, never past a hard cap, never with the card in the repo.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  }
+}

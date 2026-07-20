@@ -1,0 +1,24 @@
+name = "arena-budget-proxy"
+main = "src/index.mjs"
+compatibility_date = "2026-07-01"
+workers_dev = true
+
+# Lifetime hard cap in cents. $20.00 total, NOT per day — it does not auto-reset. This is the
+# proxy-side ceiling; pair it with a matching bank/card-side limit so the cap is enforced at the
+# issuer too, not only by this code.
+[vars]
+TOTAL_CAP_CENTS = "2000"
+
+# The atomic ledger. SQLite-backed Durable Object => eligible on the free Workers plan.
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "Budget"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Budget"]
+
+# Secrets (never in this file, set out-of-band):
+#   wrangler secret put BUDGET_PROXY_TOKEN     # shared bearer token the arena presents (also in GH privileged env)
+#   wrangler secret put ADMIN_TOKEN            # separate token for /admin/reset (Worker-only; arena never needs it)
+#   (later, only when arming real spend) the card is executed server-side from a Worker secret.
