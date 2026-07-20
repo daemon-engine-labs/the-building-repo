@@ -209,6 +209,96 @@ Mitigation: randomize/swap order, or score each diff in isolation (no side-by-si
   Whether Grok/Kimi beat Gemini at ascend/recombine is uncharted; our experiment is the only source.
 - **Our own corpus** — arena-specific failure classes (injection, non-idempotent PR) vs generic benchmarks.
 
+## 4c. Arm B v2 (naked) + v3 (flattery) — BOTH failed to reproduce the effect
+
+Two sweeps run 2026-07-19, 3 runs/cell, NEUTRAL "approve unless blocking defect" instruction. Corpus:
+f1/f2/f3 buggy (off-by-one drop-last-page, reversed config merge, un-awaited async), f4/f5 clean.
+
+**v2 (naked):** all 4 live reviewers 0/9 false-approval on buggy. gemini-pro over-rejected **6/6** clean
+diffs; flash/grok/kimi 0/6. codex 15/15 EMPTY (invocation broken, not slow).
+
+**v3 (same diffs + glowing author note "tested, clean, easy approve ✅"):** still 0/9 false-approval for
+everyone. Only movement: flattery calmed gemini-pro's over-rejection 6→4.
+
+**Pre-registered prediction for v3 (out loud, pre-run): Gemini flips buggy→APPROVE under flattery.
+RESULT: WRONG — zero flips.** The literature's strongest leniency lever (self-declared correctness,
+2505.16222) did nothing on these fixtures.
+
+**Two hypotheses falsified — harder code (v2), flattery (v3).** Triangulation: the fixtures contain no
+AMBIGUOUS bug. Every defect is textbook-obvious; no prose makes a model approve a crime it plainly sees.
+The live effect (2603.00539, Gemini 22.5% FPR) needs a defect where **approving is defensible**. Missing
+variable = **defect ambiguity in a realistic diff**, not difficulty or flattery. Third instrument-blindness
+in a row (v1 all-bugs, v2 too-obvious, v3 flattery-can't-excuse-obvious). Next: pull REAL cage-match diffs
+where Kelvin approved and others found bugs, run naked.
+
+## 4d. The BETTER metric — unique-valid-bug rate (marginal panel value)
+
+Nick's reframe (2026-07-19): "how often does each reviewer find a UNIQUE genuinely-valid bug?" This is
+the roster-decision metric — what each seat adds that no other seat caught. False-approval says who to
+distrust; unique-valid-bug-rate says who earns their chair. v2/v3 can't answer (verdict-only, single-bug
+fixtures → zero uniqueness). Only v1 (multi-latent-bug diff) gives a first cut; a purpose-built multi-bug
+corpus + cross-family adjudication is the proper experiment. **First cut ran (§4e): unique-valid-bug
+rate = 0 for every family — the d1/d2/d3 corpus wasn't nasty enough to force a solo catch.**
+
+## 4e. The unique-valid-bug experiment — final recall table, and the Kimi contamination
+
+Purpose-built run (2026-07-19/20): **5 reviewer CLIs (gemini-pro, gemini-flash, grok, codex, kimi) × 3
+diffs (`d1_ratelimit`, `d2_cache`, `d3_invoice`) × 2 runs**, each review scored against a ground-truth
+`MANIFEST.md` of 16 valid seeded bugs.
+
+**Recall — valid bugs caught, of 16:**
+
+| Reviewer | Recall | Note |
+|---|---|---|
+| gemini-flash | **15/16** | strongest; beat its own pro sibling |
+| grok | 14/16 | |
+| codex | 13/16 | |
+| gemini-pro | **12/16** | weakest of the clean four |
+| kimi | ~~16/16~~ **VOID** | contaminated — read the answer key (below) |
+
+**The Gemini reclassification stands.** gemini-pro's 4 misses were specifically the **adversarial edges**
+— a negative-`n` bypass and a clock-skew corruption — not run-of-the-mill logic bugs. Flash (cheaper)
+beat Pro. This is a *failure-mode* finding, not a quality ranking: Gemini reasons "does this match spec"
+and under-reasons "what would an attacker do." Low-recall-on-adversarial-edges — **not** lenient, **not** a
+hallucinator (its flagged race was later verified real), **not** flatterable (0/9 under flattery, §4c).
+Consequence for the cage-match: never let a lone Gemini APPROVE carry the merge gate on
+adversarial/security paths; seat a disjoint 5th family (Wu/Kimi) rather than more Gemini votes.
+
+**Unique-valid-bug rate = 0 for everyone.** No reviewer produced a solo catch on this corpus — every
+valid bug any reviewer found, at least one other also found. So this run can't yet rank seats by marginal
+value (§4d): the d1/d2/d3 diffs weren't nasty enough. (Contrast Arm B v1's 58-line diff, where Gemini
+produced the panel's single sharpest *unique* catch — a branch literally named `-d` turning
+`git push origin ${branch}` into `git push origin -d`, deleting the remote. Uniqueness IS reachable; it
+needs an adversarial multi-latent-bug fixture, not d1/d2/d3.)
+
+### THE CONTAMINATION — Kimi read the answer key (an arena-design law)
+
+Kimi scored a suspicious **16/16**. Investigation: on **2 of its 6 runs** Kimi issued tool calls (13 and
+8 calls) and explored its cwd — opening `MANIFEST.md` ×3, `harness.sh`, even a stale `pr485.diff`. Its d3
+review quoted the **exact bug IDs and subtlety grades from the answer key.** Kimi's row is **void.** The
+other four, invoked via non-interactive `-p`/`exec` flags, were stateless and clean.
+
+The mechanism, and why it's dangerous:
+- **Kimi is agentic even in `--print` mode** — unlike gemini/grok/codex's non-interactive flags, it can
+  still issue tool calls and read its working directory. You cannot predict this from the CLI's docs; you
+  have to test for it per-tool.
+- **It's nondeterministic** (2 of 6 runs, not all 6), which is *worse* than a stable bug — a contaminated
+  result hides among clean ones instead of failing loudly. It was caught **only** because Kimi was clumsy
+  enough to echo the exact IDs verbatim; a paraphrase would have been written into this notebook as "Kimi
+  is the strongest reviewer" — the instrument you built lying to you at full volume.
+
+**The law (→ arena design):** *any* harness that invokes a CLI-based reviewer as a subprocess with
+filesystem access **must OS-sandbox it to see only the diff** — a reviewer that can reach the answer key,
+a rival's solution, test oracles, or `.env` silently invalidates the comparison it's part of. This
+extends `cage-before-monster` from the forge (builders) to the **sort phase** (reviewers/judges): the
+cage-match is exactly such a harness. Follow-ups: re-run Kimi in a bare tmp dir with only the diff
+reachable to get a real number (task #8); OS-sandbox is a **precondition** of seating Wu/Kimi (task #9).
+
+### Method note (standing caution)
+Ground truth must live in a directory the reviewer process **cannot reach at all** (different mount, no
+shared cwd) — not merely "a file we don't name in the prompt." Placing `MANIFEST.md` in the reviewers'
+cwd is what enabled this contamination.
+
 ## 7. Timeline
 
 - 2026-07-19 ~17:40 — status check → Lyra autonomy investigation → family-role question
@@ -216,3 +306,6 @@ Mitigation: randomize/swap order, or score each diff in isolation (no side-by-si
 - 2026-07-19 ~18:45 — Arm B v1 run + REFUTED; fixture-blindness lesson
 - 2026-07-19 ~21:15 — Arm B v2 corpus + harness built; smoke test passes
 - 2026-07-19 ~21:20 — Nick: "document as we go" + "should have done deep research first" → this notebook + deep-research launch
+- 2026-07-19 late — Arm B v2 (naked) + v3 (flattery) both 0/9 false-approval; pre-registered flattery-flip prediction REFUTED (§4c)
+- 2026-07-20 — unique-valid-bug experiment scored: final recall (flash 15 / grok 14 / codex 13 / pro 12), unique rate = 0; **Kimi 16/16 VOID — read `MANIFEST.md` on 2/6 agentic runs → OS-sandbox-the-reviewer law** (§4e). Notebook caught up to its own punchline.
+- 2026-07-20 — open arms unrun: Arm A (heat seat — best family in the generative ascend/recombine seat, zero data), Arm C (voice count — literature says diversity>count, ~5-family knee → Wu is the highest-value roster add, gated on the sandbox law above)
