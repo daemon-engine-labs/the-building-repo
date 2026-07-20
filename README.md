@@ -18,7 +18,7 @@ How that's enforced:
 | Untrusted proposals | Run on a **zero-secret sandbox runner**, egress-filtered, can only open a PR |
 | Privileged builds | Run on a **separate runner** that holds secrets, only for allowlisted actors / merged code |
 | Self-modification (personas, tools, workflows) | Always a **PR to `main`**, reviewed (cage-match) before it has power. The merge is the door — the issue never is. |
-| Spending money | A **budget proxy** holds the real card behind a hard daily cap; the repo never sees the PAN |
+| Spending money | A **budget proxy** (`budget-proxy/`) enforces a hard cap and the repo never sees the PAN; capped-authorization primitive is deployed + proven, real card deferred to a cage-matched arming step |
 | Fork-PR RCE on the self-hosted runner | Untrusted PRs use `pull_request` (no secrets, read-only token); never `pull_request_target` |
 
 **Two runners, not one.** Trust is enforced *physically* — a `sandbox` runner with no secrets and no write access to `.github/`, and a `privileged` runner with secrets. A label is a fence; separate runners with separate secret scope is a wall.
@@ -35,7 +35,7 @@ agents/<name>/persona.md        # each agent's personality (agents PR-edit these
 agents/<name>/tools.json        # tools each agent may request
 allowlist.txt                   # trusted GitHub logins (editing it is itself a gated PR)
 arena/                          # the orchestrator — routes issues to the agent CLIs, runs the rivalry
-budget-proxy/                   # (todo) holds the real card behind a daily cap
+budget-proxy/                   # capped-spend authorization proxy (Cloudflare Worker); real card deferred to arming
 ```
 
 ## The arena, not a harness
