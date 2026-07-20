@@ -89,6 +89,7 @@ jobs:
           # arena/run.mjs reads ISSUE_TITLE/ISSUE_BODY from env (no interpolation).
           AGENT=claude MODE=privileged node arena/run.mjs || echo "arena exited rc=$?"
       - name: open PR if the forge produced changes
+        id: pr
         run: |
           if [ -z "$(git status --porcelain)" ]; then
             echo "No changes produced — nothing to PR."
@@ -100,3 +101,37 @@ jobs:
           gh pr create --base main --head "agent/issue-${ISSUE_NUMBER}" \
             --title "Build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
             --body "Automated build by the arena (Maxwell/claude) for #${ISSUE_NUMBER}. Review before merge."
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+
+      - name: Maxwell self-review — solo pass (separate reviewer invocation)
+        # A SECOND, distinct claude invocation reviews the build's diff with agents/claude/review.md —
+        # it sees ONLY the diff, never the builder's transcript, so it can't rubber-stamp its own work.
+        # ADVISORY, not a gate: a failed review must NOT block or delete the already-open PR, and must
+        # be SURFACED (a comment) rather than swallowed. A human still merges ("the merge is the door").
+        # This is a solo pass until the real N-family cage-match is wired — it says so, so nobody reads
+        # it as consensus. Runs only when a PR was actually opened.
+        if: steps.pr.outputs.opened == 'true'
+        run: |
+          set +e
+          DIFF=$(git diff main...HEAD)
+          if [ -z "$DIFF" ]; then
+            # opened=true guaranteed a non-empty porcelain + a commit, so an empty diff here is an
+            # anomaly (base-ref drift / detached state), not a benign nothing — surface it.
+            echo "::warning::self-review: opened=true but 'git diff main...HEAD' is empty — investigate"
+            exit 0
+          fi
+          REVIEW=$(printf '%s' "$DIFF" | node arena/self-review.mjs)
+          RC=$?
+          if [ "$RC" -ne 0 ] || [ -z "$REVIEW" ]; then
+            gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+              --body "⚠️ **Maxwell self-review could not run** (rc=${RC}). The PR stands — review it manually. This is an advisory solo pass, never a merge gate." \
+              || echo "::warning::self-review failed (rc=${RC}) AND the failure comment could not post"
+            echo "::warning::self-review failed (rc=${RC}); surfaced as a PR comment"
+            exit 0
+          fi
+          # GitHub caps issue/PR comment bodies at 65536 chars; keep well under it (the review is
+          # advisory, so truncating is fine — better than a failed post turning this green job red).
+          REVIEW="${REVIEW:0:60000}"
+          gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+            --body "$(printf '**Maxwell self-review — solo pass** _(advisory; the full multi-family cage-match is not yet wired, so this is one voice, not consensus. A human still merges.)_\n\n---\n\n%s' "$REVIEW")" \
+            || echo "::warning::self-review ran but the PR comment could not post; PR stands"
