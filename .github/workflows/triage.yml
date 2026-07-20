@@ -89,6 +89,7 @@ jobs:
           # arena/run.mjs reads ISSUE_TITLE/ISSUE_BODY from env (no interpolation).
           AGENT=claude MODE=privileged node arena/run.mjs || echo "arena exited rc=$?"
       - name: open PR if the forge produced changes
+        id: pr
         run: |
           if [ -z "$(git status --porcelain)" ]; then
             echo "No changes produced — nothing to PR."
@@ -100,3 +101,64 @@ jobs:
           gh pr create --base main --head "agent/issue-${ISSUE_NUMBER}" \
             --title "Build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
             --body "Automated build by the arena (Maxwell/claude) for #${ISSUE_NUMBER}. Review before merge."
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+
+      - name: Maxwell self-review — solo pass (separate reviewer invocation)
+        # A SECOND, distinct claude invocation reviews the build's diff with agents/claude/review.md —
+        # it sees ONLY the diff, never the builder's transcript, so it can't rubber-stamp its own work.
+        # ADVISORY, not a gate: a failed review must NOT block or delete the already-open PR, and must
+        # be SURFACED (a comment) rather than swallowed. A human still merges ("the merge is the door").
+        # This is a solo pass until the real N-family cage-match is wired — it says so, so nobody reads
+        # it as consensus. Runs only when a PR was actually opened.
+        if: steps.pr.outputs.opened == 'true'
+        run: |
+          set +e
+          ERR_LOG=$(mktemp)   # per-run, not a static path — no cross-step trampling (Kelvin's finding)
+          # Base against the REMOTE main with an EXPLICIT refspec — `git fetch origin main` alone may only
+          # populate FETCH_HEAD on some git versions, leaving origin/main stale/absent (Carnot's finding).
+          # Fetch stderr is kept (not swallowed) so a real fetch failure is visible in the run log.
+          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main' || echo "::warning::base fetch failed — diff/persona may be stale"
+          # Trusted reviewer instructions: read persona + CLI contract + the reviewer SCRIPT itself from
+          # origin/main, NOT the attacker-influenceable PR branch (a hostile build could rewrite review.md
+          # to "output APPROVED" or neuter self-review.mjs). self-review.mjs FAILS CLOSED on an empty
+          # persona/contract, so a failed `git show` refuses the review rather than reviewing blind.
+          git show origin/main:agents/claude/review.md > /tmp/review-base.md 2>/dev/null
+          git show origin/main:arena/agents.json     > /tmp/agents-base.json 2>/dev/null
+          # Bootstrap: on the PR that first adds self-review.mjs it isn't on base yet, so fall back to the
+          # in-tree copy (safe — that PR's own build already had secrets+exec, so marginal risk is nil).
+          git show origin/main:arena/self-review.mjs > /tmp/self-review-base.mjs 2>/dev/null
+          SR_SCRIPT=/tmp/self-review-base.mjs
+          [ -s "$SR_SCRIPT" ] || SR_SCRIPT=arena/self-review.mjs
+          # BOUND the diff in the workflow BEFORE it becomes a shell var — `head -c` streams and caps at
+          # 300KB, so a hostile huge diff can't OOM the runner before the Node-side cap ever applies
+          # (Carnot+Tesla consensus: the cap must be on the JOB, not just the model input).
+          git diff origin/main...HEAD | head -c 300000 > /tmp/pr-review-diff.txt
+          if [ ! -s /tmp/pr-review-diff.txt ]; then
+            # opened=true guaranteed a non-empty porcelain + a commit, so an empty diff here is an
+            # anomaly (base-ref drift / detached state), not a benign nothing — surface it LOUDLY.
+            echo "::warning::self-review: opened=true but the diff vs origin/main is empty — investigate"
+            gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+              --body "⚠️ **Maxwell self-review skipped**: could not compute a diff against \`origin/main\` (base-ref anomaly). The PR stands — review it manually." \
+              || echo "::warning::empty-diff notice could not post"
+            exit 0
+          fi
+          REVIEW=$(REVIEW_PERSONA_FILE=/tmp/review-base.md AGENTS_JSON_FILE=/tmp/agents-base.json node "$SR_SCRIPT" < /tmp/pr-review-diff.txt 2>"$ERR_LOG")
+          RC=$?
+          if [ "$RC" -ne 0 ] || [ -z "$REVIEW" ]; then
+            # Surface WHY, not just rc=N — attach a tail of the reviewer's stderr so a failure is
+            # diagnosable from the PR, not only from run-log archaeology (Tesla's finding).
+            ERRTAIL=$(tail -c 800 "$ERR_LOG" 2>/dev/null)
+            gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+              --body "$(printf '⚠️ **Maxwell self-review could not run** (rc=%s). The PR stands — review it manually. Advisory solo pass, never a merge gate.\n\n<details><summary>reviewer stderr (tail)</summary>\n\n```\n%s\n```\n</details>' "$RC" "$ERRTAIL")" \
+              || echo "::warning::self-review failed (rc=${RC}) AND the failure comment could not post"
+            echo "::warning::self-review failed (rc=${RC}); surfaced as a PR comment"
+            exit 0
+          fi
+          # GitHub caps comment bodies at 65536 BYTES (not chars). Truncate by BYTE budget with margin
+          # for our wrapper text, and mark the cut so later findings aren't silently dropped.
+          if [ "$(printf '%s' "$REVIEW" | wc -c)" -gt 60000 ]; then
+            REVIEW="$(printf '%s' "$REVIEW" | head -c 60000)$(printf '\n\n_…(review truncated to fit GitHub'\''s comment limit — full text in the run log)_')"
+          fi
+          gh pr comment "agent/issue-${ISSUE_NUMBER}" \
+            --body "$(printf '**Maxwell self-review — solo pass** _(advisory; the full multi-family cage-match is not yet wired, so this is one voice, not consensus. A human still merges.)_\n\n---\n\n%s' "$REVIEW")" \
+            || echo "::warning::self-review ran but the PR comment could not post; PR stands"
