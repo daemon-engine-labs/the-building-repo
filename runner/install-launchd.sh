@@ -60,10 +60,10 @@ for label in "${AGENTS[@]}"; do
   done
 done
 
-# Clear stale failure-backoff state so a fresh install doesn't inherit a prior storm's capped sleep
-# (a runner would otherwise sit in a 300s backoff on its first post-install relaunch).
-rm -f "${TMPDIR:-/tmp}"/arena-sandbox-consecutive-fails \
-      "${TMPDIR:-/tmp}"/arena-privileged-consecutive-fails 2>/dev/null || true
+# Clear stale failure-backoff state so a fresh install doesn't inherit a prior storm's capped sleep.
+# Same stable $HOME path the runners use (NOT TMPDIR — the installer shell and the launchd agent get
+# different per-session TMPDIRs, so a TMPDIR clear here would never reach the agent's state file).
+rm -f "$HOME/.arena-sandbox.fails" "$HOME/.arena-privileged.fails" 2>/dev/null || true
 
 # --- 2. Reap legacy pre-launchd nohup loops (narrow) ---------------------------------------------
 # Only bash-INVOKED script processes, so an editor/pager/grep holding one of these paths open is not

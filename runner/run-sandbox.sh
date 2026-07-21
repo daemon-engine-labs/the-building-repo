@@ -21,7 +21,9 @@ RUNNER_KIND="sandbox"
 # Host-side failure-backoff state: caps the registration-token mint rate when a job fails FAST after
 # docker is already up (a bad image / config.sh death), so KeepAlive's 10s throttle can't turn into a
 # token-mint storm against GitHub. Reset on any clean job. See run_oneshot().
-FAIL_STATE="${TMPDIR:-/tmp}/arena-${RUNNER_KIND}-consecutive-fails"
+# Stable, launchd-independent path. launchd agents get a per-session TMPDIR under /var/folders/, so a
+# TMPDIR path would neither match the installer's clear nor be predictable; a fixed $HOME dotfile is.
+FAIL_STATE="$HOME/.arena-${RUNNER_KIND}.fails"
 BACKOFF_BASE="${ARENA_BACKOFF_BASE:-10}"   # seconds
 BACKOFF_CAP="${ARENA_BACKOFF_CAP:-300}"    # seconds
 
@@ -122,11 +124,14 @@ run_oneshot() {
   fi
   # Real job failure with healthy infra → a token was minted. Back off exponentially (capped) before
   # exiting so KeepAlive's relaunch cadence — and the token-mint rate — grows instead of a fixed 10s.
-  local n backoff i raw
-  # Sanitize: a corrupt/partial FAIL_STATE must not abort the script via a bad arithmetic expansion.
-  raw="$(tr -cd '0-9' < "$FAIL_STATE" 2>/dev/null)"
-  n=$(( ${raw:-0} + 1 ))
-  echo "$n" > "$FAIL_STATE"
+  local n=0 backoff i
+  # [ -f ]-GUARD the read: on the FIRST failure FAIL_STATE doesn't exist, and a failed `<` redirection
+  # under set -e aborts the shell BEFORE the counter is written (verified on bash 3.2 AND 5.x) — which
+  # would pin backoff at BASE forever and reinstate the token storm. Guarding + sanitizing the digits
+  # makes the read total: no missing file, no corrupt content, can abort it.
+  [ -f "$FAIL_STATE" ] && { n=$(tr -cd '0-9' < "$FAIL_STATE" 2>/dev/null) || n=0; }
+  n=$(( ${n:-0} + 1 ))
+  echo "$n" > "$FAIL_STATE" 2>/dev/null || true
   # Arithmetic loop, NOT `seq 2 $n`: BSD/macOS `seq 2 1` counts DOWN ("2 1"), so n=1 would double
   # twice (10→40) instead of staying at BASE. `for ((...))` yields zero iterations at n=1 as intended.
   backoff=$BACKOFF_BASE
