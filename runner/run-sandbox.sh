@@ -33,16 +33,24 @@ command -v gh >/dev/null || { echo "gh CLI required"; exit 1; }
 # means "infra not ready yet" (distinct from "job failed"): prompt relaunch, no backoff.
 wait_for_docker() {
   local tries=0
-  hash -r
-  until docker info >/dev/null 2>&1; do
+  # hash -r EACH iteration: a colima binary move mid-wait (after the first successful `docker info`
+  # or between iterations) must not be masked by a cached path — matches the README's belt-and-braces.
+  until hash -r; docker info >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -gt 60 ] && { echo "[sandbox] docker/colima not ready after 120s — exiting for relaunch" >&2; return 1; }
     echo "[sandbox] waiting for docker/colima ($tries)…"; sleep 2
   done
-  # The egress wall must be up: no arena-internal network → run.sh would have no route out. The
-  # arena-egress agent raises it; if it hasn't yet, exit and let launchd relaunch us (no backoff).
+  # The egress wall must be FUNCTIONAL, not merely named. Checking that arena-internal EXISTS is not
+  # enough: after a reboot/colima flap the network can linger while the proxy is down or mid-recreate.
+  # If we passed on existence alone we'd mint a registration token into a dead route, then burn the
+  # failure-backoff. So require BOTH the network AND a running proxy; a not-yet-ready wall is treated
+  # like infra (exit for relaunch, no mint, no FAIL_STATE) — the arena-egress agent is raising it.
   docker network inspect arena-internal >/dev/null 2>&1 || {
     echo "[sandbox] egress wall not up yet (arena-internal missing) — exiting for relaunch" >&2
+    return 1
+  }
+  [ "$(docker inspect -f '{{.State.Running}}' egress 2>/dev/null)" = "true" ] || {
+    echo "[sandbox] egress proxy not running yet — exiting for relaunch" >&2
     return 1
   }
 }
@@ -58,6 +66,9 @@ run_job() {
   # Token is passed as a docker -e env var and expanded INSIDE the container (single-quoted inner
   # script), never interpolated into the host's bash -c string — so a token with shell
   # metacharacters can't break or inject into the command.
+  # Remove any stale same-name container (a killed prior script that didn't --rm, then PID reuse) so
+  # --name can't collide and wedge us into backoff before the runner can even deregister.
+  docker rm -f "arena-sandbox-$$" >/dev/null 2>&1 || true
   docker run --rm \
     --name "arena-sandbox-$$" \
     --label arena-runner=sandbox \
@@ -87,11 +98,13 @@ run_oneshot() {
   # Failed AFTER docker+egress were ready → a real job failure that already minted a token. Back off
   # exponentially (capped) before exiting so KeepAlive's relaunch cadence — and the token-mint rate —
   # grows instead of hammering GitHub at a fixed 10s.
-  local n backoff
+  local n backoff i
   n=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$FAIL_STATE"
+  # Arithmetic loop, NOT `seq 2 $n`: BSD/macOS `seq 2 1` counts DOWN ("2 1"), so n=1 would double
+  # twice (10→40) instead of staying at BASE. `for ((...))` yields zero iterations at n=1 as intended.
   backoff=$BACKOFF_BASE
-  for _ in $(seq 2 "$n"); do
+  for (( i=2; i<=n; i++ )); do
     backoff=$(( backoff * 2 ))
     [ "$backoff" -ge "$BACKOFF_CAP" ] && { backoff=$BACKOFF_CAP; break; }
   done

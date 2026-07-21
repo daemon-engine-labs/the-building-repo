@@ -40,10 +40,22 @@ for label in "${AGENTS[@]}"; do
   tries=0
   while launchctl print "$DOMAIN/$label" >/dev/null 2>&1; do
     tries=$((tries + 1))
-    [ "$tries" -gt 40 ] && { echo "[install] WARN: $label still present 20s after bootout — continuing" >&2; break; }
+    # Fail CLOSED: continuing while an agent is still loaded lets KeepAlive resurrect it the moment
+    # step 2/3 touches its process — the exact race this ordering exists to prevent. A WARN-and-continue
+    # is a fuse that never blows; abort instead so the operator resolves the stuck agent first.
+    [ "$tries" -gt 60 ] && {
+      echo "[install] ERROR: $label still loaded 30s after bootout — aborting to avoid a KeepAlive" >&2
+      echo "          resurrection race. Resolve it by hand: launchctl bootout $DOMAIN/$label" >&2
+      exit 1
+    }
     sleep 0.5
   done
 done
+
+# Clear stale failure-backoff state so a fresh install doesn't inherit a prior storm's capped sleep
+# (a runner would otherwise sit in a 300s backoff on its first post-install relaunch).
+rm -f "${TMPDIR:-/tmp}"/arena-sandbox-consecutive-fails \
+      "${TMPDIR:-/tmp}"/arena-privileged-consecutive-fails 2>/dev/null || true
 
 # --- 2. Reap legacy pre-launchd nohup loops (narrow) ---------------------------------------------
 # Only bash-INVOKED script processes, so an editor/pager/grep holding one of these paths open is not
@@ -95,6 +107,19 @@ for label in "${AGENTS[@]}"; do
   launchctl enable "$DOMAIN/$label" 2>/dev/null || true
   launchctl kickstart -k "$DOMAIN/$label" 2>/dev/null || true
   echo "[install] loaded $label"
+
+  # After the egress agent, give the wall a moment to come up before the runners bootstrap — the
+  # runners self-heal if it isn't ready (exit + relaunch), but waiting here avoids that launch churn
+  # and the noisy failure logs during install. Best-effort: skip if docker isn't reachable.
+  if [ "$label" = "com.daemon-engine.arena-egress" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    w=0
+    until docker network inspect arena-internal >/dev/null 2>&1 \
+          && [ "$(docker inspect -f '{{.State.Running}}' egress 2>/dev/null)" = "true" ]; do
+      w=$((w + 1))
+      [ "$w" -gt 30 ] && { echo "[install] note: egress wall not up after 30s — runners will self-heal via relaunch" >&2; break; }
+      sleep 1
+    done
+  fi
 done
 
 echo

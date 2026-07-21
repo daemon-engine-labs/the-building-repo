@@ -30,8 +30,8 @@ command -v gh >/dev/null || { echo "gh CLI required"; exit 1; }
 # (distinct from "job failed"): prompt relaunch, no backoff.
 wait_for_docker() {
   local tries=0
-  hash -r
-  until docker info >/dev/null 2>&1; do
+  # hash -r EACH iteration: a colima binary move mid-wait must not be masked by a cached path.
+  until hash -r; docker info >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -gt 60 ] && { echo "[privileged] docker/colima not ready after 120s — exiting for relaunch" >&2; return 1; }
     echo "[privileged] waiting for docker/colima ($tries)…"; sleep 2
@@ -52,6 +52,8 @@ run_job() {
   # Host-side --name/--label so cleanup targets THIS runner by service identity, not image ancestry.
   # Token passed as a docker -e env var, expanded INSIDE the container (single-quoted inner script),
   # never interpolated into the host bash -c string — no metachar break/injection.
+  # Remove any stale same-name container (killed prior script + PID reuse) so --name can't collide.
+  docker rm -f "arena-privileged-$$" >/dev/null 2>&1 || true
   docker run --rm \
     --name "arena-privileged-$$" \
     --label arena-runner=privileged \
@@ -74,11 +76,13 @@ run_oneshot() {
     rm -f "$FAIL_STATE"
     exit 0
   fi
-  local n backoff
+  local n backoff i
   n=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$FAIL_STATE"
+  # Arithmetic loop, NOT `seq 2 $n`: BSD/macOS `seq 2 1` counts DOWN, doubling n=1 twice. `for ((...))`
+  # yields zero iterations at n=1 as intended.
   backoff=$BACKOFF_BASE
-  for _ in $(seq 2 "$n"); do
+  for (( i=2; i<=n; i++ )); do
     backoff=$(( backoff * 2 ))
     [ "$backoff" -ge "$BACKOFF_CAP" ] && { backoff=$BACKOFF_CAP; break; }
   done

@@ -73,6 +73,17 @@ tail -f ~/Library/Logs/arena-{egress,privileged,sandbox}.log
 launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbox}
 ```
 
+### Operational caveats
+
+- **These are LaunchAgents (`gui/$UID`), not LaunchDaemons** — they need a logged-in GUI session.
+  After a headless reboot with no console login, nothing starts until someone logs in. If the runner
+  host must come up unattended, enable auto-login or promote these to LaunchDaemons (root, different
+  security posture) as a follow-up.
+- **Ctrl-C any manually-started self-loop runners before installing.** The installer's legacy reap is
+  narrow on purpose (it only matches `bash`-invoked script processes, so it can't kill an editor that
+  has the file open). A runner you started as a bare `./run-sandbox.sh` may survive the reap; it's
+  `--ephemeral --replace`, so a stray duplicate self-resolves, but stopping it first avoids the churn.
+
 ## What makes this a wall, not a fence
 
 - **No direct route:** the runner sits on `arena-internal` (a `--internal` docker network). Its
