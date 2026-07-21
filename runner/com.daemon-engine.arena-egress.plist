@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable supervisor for the arena EGRESS WALL (the tinyproxy sidecar + its two docker networks).
+  Installed to ~/Library/LaunchAgents/ by runner/install-launchd.sh.
+
+  Why a dedicated agent: the runners have no route out except through this wall, but nothing used to
+  re-raise it after a reboot — the sandbox runner would thrash on a 10s relaunch loop until a human
+  ran up-egress.sh by hand. This agent makes launchd the SINGLE supervisor of the wall: run-egress.sh
+  raises it, then `docker wait`s on the proxy so the agent lives exactly as long as the wall and its
+  death (KeepAlive) re-raises. The runners depend on this network; on boot their own exit+relaunch
+  naturally waits for this agent to bring the wall up.
+
+  PATH is set explicitly because launchd agents inherit a minimal PATH that EXCLUDES
+  /opt/homebrew/bin — where docker and colima live on this box.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.daemon-engine.arena-egress</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nick/git/experiments/the-building-repo/runner/run-egress.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/nick/git/experiments/the-building-repo</string>
+
+  <!-- Start at login and keep the wall up: when the proxy dies (run-egress.sh exits), relaunch to
+       re-raise. ThrottleInterval caps respawn to once per 10s if it exits instantly (e.g. while
+       colima is still coming up — the script fails fast and relaunches). -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/nick/Library/Logs/arena-egress.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nick/Library/Logs/arena-egress.log</string>
+</dict>
+</plist>

@@ -1,55 +1,97 @@
 #!/usr/bin/env bash
-# Install the arena runners as launchd LaunchAgents (durable supervision — replaces nohup loops).
-# Idempotent: safe to re-run. It (1) stops any old nohup loops, (2) ensures the egress wall is up,
-# (3) copies the plists into ~/Library/LaunchAgents with paths rewritten to THIS checkout + $HOME,
-# and (4) (re)bootstraps both agents. Run once on the runner host:  bash runner/install-launchd.sh
+# Install the arena runners + egress wall as launchd LaunchAgents (durable supervision — replaces
+# nohup loops). Idempotent: safe to re-run. Ordering is deliberate and BOOTOUT-FIRST:
+#
+#   1. bootout ALL agents and WAIT for them to disappear — so KeepAlive cannot resurrect a runner
+#      mid-install (the race that made the old "just re-run it" claim a lie).
+#   2. reap any legacy pre-launchd nohup loops (narrow, bash-invoked matches only).
+#   3. stop old runner containers BY SERVICE LABEL (arena-runner), now that nothing supervised is
+#      live to recreate them.
+#   4. install each plist with paths repointed at THIS checkout + $HOME via PlistBuddy (not sed —
+#      no regex-metachar corruption of valid paths).
+#   5. bootstrap egress FIRST (it raises the wall), then the two runners.
+#
+# Run on the runner host:  bash runner/install-launchd.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Single-value fallback (NOT `git ... || pwd` — that precedence prints both, and a two-line
-# REPO_ROOT breaks the sed below with an embedded newline).
+# Single-value fallback (NOT `git ... || pwd` — that precedence prints both).
 REPO_ROOT="$(git -C "$HERE/.." rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cd "$HERE/.." && pwd)"
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
 LA_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
-IMAGE="arena-sandbox-runner"
-AGENTS=(com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
+PLISTBUDDY=/usr/libexec/PlistBuddy
+# Egress FIRST so its wall is up before the runners bootstrap; runners self-heal if it isn't yet.
+AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
 
-# 1. Stop the legacy nohup loops AND their runner containers so we don't leave duplicate runners
-#    registered. Containers are targeted BY IMAGE (--filter ancestor=), never by exclusion —
-#    a graceful `docker stop` lets the ephemeral runner deregister itself from GitHub.
-if pgrep -f 'run-sandbox.sh|run-privileged.sh' >/dev/null 2>&1; then
-  echo "[install] stopping legacy nohup runner loops…"
-  pkill -f 'run-sandbox.sh' 2>/dev/null || true
-  pkill -f 'run-privileged.sh' 2>/dev/null || true
-fi
-old_containers="$(docker ps -q --filter "ancestor=$IMAGE" 2>/dev/null || true)"
-if [ -n "$old_containers" ]; then
-  echo "[install] gracefully stopping old runner containers (image $IMAGE)…"
-  # shellcheck disable=SC2086
-  docker stop $old_containers >/dev/null || true
+# --- 1. Bootout ALL agents first, then wait for them to actually disappear ------------------------
+# bootout is asynchronous; bootstrapping (step 5) before teardown completes fails with
+# "Bootstrap failed: 5: Input/output error". More importantly, KeepAlive treats a still-loaded
+# agent's process death (from a stray pkill/docker stop below) as a clean exit and RELAUNCHES it —
+# so we must remove the agents from launchd entirely BEFORE touching processes or containers.
+for label in "${AGENTS[@]}"; do
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+done
+for label in "${AGENTS[@]}"; do
+  tries=0
+  while launchctl print "$DOMAIN/$label" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 40 ] && { echo "[install] WARN: $label still present 20s after bootout — continuing" >&2; break; }
+    sleep 0.5
+  done
+done
+
+# --- 2. Reap legacy pre-launchd nohup loops (narrow) ---------------------------------------------
+# Only bash-INVOKED script processes, so an editor/pager/grep holding one of these paths open is not
+# a target. The launchd-managed processes are already gone (step 1), so anything left is a real
+# pre-launchd straggler.
+for s in run-egress.sh run-privileged.sh run-sandbox.sh; do
+  pkill -f "bash.*runner/$s" 2>/dev/null || true
+done
+
+# --- 3. Stop old runner containers by SERVICE LABEL ----------------------------------------------
+# Target by identity (label=arena-runner), not image ancestry — ancestry also matches the OTHER
+# runner and any manual test container from the same image. A graceful `docker stop` lets the
+# ephemeral runner deregister itself from GitHub. Nothing supervised is live now (steps 1-2), so
+# this cannot race a resurrected agent. (The tinyproxy proxy is a different image and unlabeled, so
+# it is untouched here — the egress agent owns its lifecycle.)
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  old_containers="$(docker ps -q --filter "label=arena-runner" 2>/dev/null || true)"
+  if [ -n "$old_containers" ]; then
+    echo "[install] gracefully stopping old runner containers (label arena-runner)…"
+    # shellcheck disable=SC2086
+    docker stop $old_containers >/dev/null || true
+  fi
 fi
 
-# 2. Ensure the egress wall (networks + tinyproxy) is up — the sandbox runner needs it.
-echo "[install] ensuring egress wall is up…"
-bash "$HERE/up-egress.sh"
-
-# 3. Install each plist, rewriting the baked-in default paths to this checkout + this $HOME.
+# --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
 for label in "${AGENTS[@]}"; do
   src="$HERE/$label.plist"
   dst="$LA_DIR/$label.plist"
   [ -f "$src" ] || { echo "[install] missing plist: $src" >&2; exit 1; }
-  # Repoint ProgramArguments/WorkingDirectory/logs at the real locations (self-heals if moved).
-  sed -e "s#/Users/nick/git/experiments/the-building-repo#${REPO_ROOT}#g" \
-      -e "s#/Users/nick/Library/Logs#${LOG_DIR}#g" \
-      "$src" > "$dst"
-  # Re-bootstrap: bootout the old instance (ignore if absent), then bootstrap + kickstart fresh.
-  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
-  launchctl bootstrap "$DOMAIN" "$dst"
+  cp "$src" "$dst"
+
+  # Repoint the baked-in default paths at THIS checkout + $HOME. PlistBuddy Set takes literal
+  # values — no sed/regex, so a path containing '#', '&', or a backslash cannot corrupt the plist.
+  prog_base="$("$PLISTBUDDY" -c "Print :ProgramArguments:0" "$dst")"; prog_base="$(basename "$prog_base")"
+  out_base="$("$PLISTBUDDY" -c "Print :StandardOutPath" "$dst")";     out_base="$(basename "$out_base")"
+  err_base="$("$PLISTBUDDY" -c "Print :StandardErrorPath" "$dst")";   err_base="$(basename "$err_base")"
+  "$PLISTBUDDY" -c "Set :ProgramArguments:0 $REPO_ROOT/runner/$prog_base" "$dst"
+  "$PLISTBUDDY" -c "Set :WorkingDirectory $REPO_ROOT" "$dst"
+  "$PLISTBUDDY" -c "Set :StandardOutPath $LOG_DIR/$out_base" "$dst"
+  "$PLISTBUDDY" -c "Set :StandardErrorPath $LOG_DIR/$err_base" "$dst"
+
+  # Bootstrap fresh (agents were booted out + confirmed gone in step 1). Retry once on the rare
+  # residual-teardown race rather than aborting the whole install under `set -e`.
+  if ! launchctl bootstrap "$DOMAIN" "$dst" 2>/dev/null; then
+    sleep 1
+    launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    launchctl bootstrap "$DOMAIN" "$dst"
+  fi
   launchctl enable "$DOMAIN/$label" 2>/dev/null || true
   launchctl kickstart -k "$DOMAIN/$label" 2>/dev/null || true
   echo "[install] loaded $label"
@@ -57,6 +99,7 @@ done
 
 echo
 echo "[install] done. Verify with:"
-echo "  launchctl print $DOMAIN/com.daemon-engine.arena-privileged | grep -E 'state|pid'"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-egress | grep -E 'state|pid'"
+echo "  docker ps --filter name=egress   # the wall's proxy should be up"
 echo "  gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'"
-echo "  tail -f $LOG_DIR/arena-privileged.log"
+echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log"

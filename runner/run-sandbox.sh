@@ -9,7 +9,7 @@
 # The old nohup while-loop wedged silently when colima moved the docker binary across an infra
 # restart (bash kept a stale command hash); oneshot + `hash -r` below make that impossible.
 #
-# Prereqs: `up-egress.sh` has run; image built:
+# Prereqs: the egress wall is up (com.daemon-engine.arena-egress / up-egress.sh); image built:
 #   docker build -t arena-sandbox-runner -f runner/Dockerfile runner
 # Auth: runs on YOUR box and uses `gh` (your auth) to mint runner tokens.
 set -euo pipefail
@@ -17,13 +17,20 @@ set -euo pipefail
 REPO="daemon-engine-labs/the-building-repo"
 IMAGE="arena-sandbox-runner"
 PROXY="http://egress:8888"
+RUNNER_KIND="sandbox"
+# Host-side failure-backoff state: caps the registration-token mint rate when a job fails FAST after
+# docker is already up (a bad image / config.sh death), so KeepAlive's 10s throttle can't turn into a
+# token-mint storm against GitHub. Reset on any clean job. See run_oneshot().
+FAIL_STATE="${TMPDIR:-/tmp}/arena-${RUNNER_KIND}-consecutive-fails"
+BACKOFF_BASE="${ARENA_BACKOFF_BASE:-10}"   # seconds
+BACKOFF_CAP="${ARENA_BACKOFF_CAP:-300}"    # seconds
 
 command -v gh >/dev/null || { echo "gh CLI required"; exit 1; }
 
 # Drop bash's cached command→path table, block until the docker daemon (colima VM) answers, and
 # assert the egress wall exists. `hash -r` re-resolves docker/gh from PATH after any infra restart
-# that moved the binary — the exact failure that silently wedged the nohup loop. Any non-zero return
-# makes the launchd agent exit and relaunch (self-healing boot ordering vs colima + up-egress).
+# that moved the binary — the exact failure that silently wedged the nohup loop. A non-zero return
+# means "infra not ready yet" (distinct from "job failed"): prompt relaunch, no backoff.
 wait_for_docker() {
   local tries=0
   hash -r
@@ -32,43 +39,76 @@ wait_for_docker() {
     [ "$tries" -gt 60 ] && { echo "[sandbox] docker/colima not ready after 120s — exiting for relaunch" >&2; return 1; }
     echo "[sandbox] waiting for docker/colima ($tries)…"; sleep 2
   done
-  # The egress wall must be up: no arena-internal network → run.sh would have no route out.
+  # The egress wall must be up: no arena-internal network → run.sh would have no route out. The
+  # arena-egress agent raises it; if it hasn't yet, exit and let launchd relaunch us (no backoff).
   docker network inspect arena-internal >/dev/null 2>&1 || {
-    echo "[sandbox] egress wall missing (arena-internal) — run runner/up-egress.sh first; exiting for relaunch" >&2
+    echo "[sandbox] egress wall not up yet (arena-internal missing) — exiting for relaunch" >&2
     return 1
   }
 }
 
-run_once() {
-  wait_for_docker || return 1
+# Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
+# wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
+run_job() {
   local token
   token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)"
-  # --network arena-internal: no direct internet. Proxy env: only allowlisted hosts reachable.
-  # --rm + --ephemeral (below): the container is destroyed after one job — nothing persists.
-  # (We do NOT use --read-only: the runner writes .env/.path/_diag/_work into its own home,
-  #  which a read-only rootfs blocks. Ephemerality + network isolation + no secrets + no host
-  #  mounts already bound the blast radius; read-only was redundant hardening. Named tradeoff.)
+  # Host-side --name/--label so cleanup can target THIS runner's containers by service identity
+  # rather than by image ancestry (which also matches the privileged runner and manual test
+  # containers). $$ = this oneshot's pid → unique per launch.
+  # Token is passed as a docker -e env var and expanded INSIDE the container (single-quoted inner
+  # script), never interpolated into the host's bash -c string — so a token with shell
+  # metacharacters can't break or inject into the command.
   docker run --rm \
+    --name "arena-sandbox-$$" \
+    --label arena-runner=sandbox \
     --network arena-internal \
     -e HTTP_PROXY="$PROXY"  -e HTTPS_PROXY="$PROXY" \
     -e http_proxy="$PROXY"  -e https_proxy="$PROXY" \
     -e NO_PROXY="localhost,127.0.0.1" \
-    "$IMAGE" bash -c "
-      ./config.sh --url https://github.com/$REPO --token $token \
+    -e ARENA_REPO="$REPO" \
+    -e RUNNER_TOKEN="$token" \
+    "$IMAGE" bash -c '
+      ./config.sh --url "https://github.com/$ARENA_REPO" --token "$RUNNER_TOKEN" \
         --labels self-hosted,sandbox --ephemeral --unattended --replace \
-        --name sandbox-\$(hostname)-\$\$ && ./run.sh
-    "
+        --name "sandbox-$(hostname)-$$" && ./run.sh
+    '
+}
+
+# One supervised attempt under launchd. Splits "infra not ready" (relaunch fast) from "job failed
+# after infra was ready" (back off, so we don't mint a fresh registration token every 10s forever).
+run_oneshot() {
+  if ! wait_for_docker; then
+    exit 1   # infra not ready — bounded by the 120s internal wait; relaunch promptly, no backoff.
+  fi
+  if run_job; then
+    rm -f "$FAIL_STATE"
+    exit 0
+  fi
+  # Failed AFTER docker+egress were ready → a real job failure that already minted a token. Back off
+  # exponentially (capped) before exiting so KeepAlive's relaunch cadence — and the token-mint rate —
+  # grows instead of hammering GitHub at a fixed 10s.
+  local n backoff
+  n=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$FAIL_STATE"
+  backoff=$BACKOFF_BASE
+  for _ in $(seq 2 "$n"); do
+    backoff=$(( backoff * 2 ))
+    [ "$backoff" -ge "$BACKOFF_CAP" ] && { backoff=$BACKOFF_CAP; break; }
+  done
+  echo "[sandbox] job failed ($n consecutive) — backing off ${backoff}s before exit/relaunch" >&2
+  sleep "$backoff"
+  exit 1
 }
 
 # RUNNER_ONESHOT=1 → run exactly one job and exit; launchd is the supervisor/loop (fresh process
 # and env per job, KeepAlive re-registers). Unset → self-loop for manual/interactive use.
 if [ -n "${RUNNER_ONESHOT:-}" ]; then
   echo "[sandbox] oneshot: registering one ephemeral runner for $REPO"
-  run_once
+  run_oneshot
 else
   echo "[sandbox] starting ephemeral runner loop for $REPO (Ctrl-C to stop)"
   while true; do
-    run_once || echo "[sandbox] runner exited non-zero (will re-register)"
+    wait_for_docker && run_job || echo "[sandbox] runner exited non-zero (will re-register)"
     echo "[sandbox] job complete; re-registering in 2s…"
     sleep 2
   done
