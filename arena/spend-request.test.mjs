@@ -146,10 +146,20 @@ test("CLI exits 0 on a valid request file", () => {
   assert.equal(runCli(f), 0);
 });
 
-test("CLI exits 1 on a known-bad request file (fail-closed)", () => {
+test("CLI exits 1 on a bad MERCHANT (valid id — isolates the denylist, not the id regex)", () => {
+  // requestId is VALID so the ONLY reason to refuse is the merchant. A prior fixture used a 4-char id
+  // ("evil") that failed the id regex first, so the test would have passed even if the denylist were
+  // deleted — the fail-open detector was itself blind (Wu's catch). Isolate the invariant under test.
   const dir = mkdtempSync(join(tmpdir(), "sr-"));
-  const f = join(dir, "evil.json");
-  writeFileSync(f, JSON.stringify({ ...base(), requestId: "evil", merchant: "api.openai.com", amountCents: 999999 }));
+  const f = join(dir, "badmerch.json");
+  writeFileSync(f, JSON.stringify({ ...base(), requestId: "badmerch", merchant: "api.openai.com" }));
+  assert.equal(runCli(f), 1);
+});
+
+test("CLI exits 1 on an over-cap AMOUNT (valid id — isolates the cap)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sr-"));
+  const f = join(dir, "bigamount.json");
+  writeFileSync(f, JSON.stringify({ ...base(), requestId: "bigamount", amountCents: 999999 }));
   assert.equal(runCli(f), 1);
 });
 
@@ -173,8 +183,8 @@ test("CLI fires through a SYMLINKED script path (the fail-open a cage-match caug
   const dir = mkdtempSync(join(tmpdir(), "sr-sym-"));
   const link = join(dir, "validator-link.mjs");
   symlinkSync(CLI, link);
-  const bad = join(dir, "evil.json");
-  writeFileSync(bad, JSON.stringify({ ...base(), requestId: "evil", merchant: "api.openai.com", amountCents: 999999 }));
+  const bad = join(dir, "badmerch.json");
+  writeFileSync(bad, JSON.stringify({ ...base(), requestId: "badmerch", merchant: "api.openai.com" }));
   try {
     execFileSync(process.execPath, [link, bad], { stdio: "pipe" });
     assert.fail("known-bad request passed through a symlinked validator — FAIL OPEN");

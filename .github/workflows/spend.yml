@@ -29,6 +29,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Don't leave the checkout token in .git/config — the next step runs PR-AUTHORED test code,
+          # and even a contents:read token shouldn't sit beside attacker-authored code. The pin step's
+          # `git fetch origin` works anonymously on this public repo, so nothing here needs the token.
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -75,6 +80,10 @@ jobs:
             echo "::warning::bootstrap: origin/main has no arena/spend-request.mjs yet — using the in-tree validator (only a PR that itself adds the validator reaches this; concurrent request-only PRs fail closed)"
             cp arena/spend-request.mjs /tmp/validator.mjs
           fi
+          # LANDMINE for the future executor phase: this bootstrap branch runs PR-AUTHORED validator
+          # code. It is acceptable ONLY because P0 is inert ($0, no secret, no card). If this pin step
+          # is ever copied into a money-MOVING job, the bootstrap fallback MUST be deleted — a job that
+          # can spend must NEVER accept an in-tree (petitioner-authored) validator. Trusted ref only.
           # The gate invokes the validator's EXPLICIT validateFile() export (import + call), NOT the
           # self-detecting CLI. This removes the gate's dependence on entrypoint heuristics entirely —
           # a realpath/ENOENT edge in the CLI's "am I main?" check can never turn the gate into a no-op.

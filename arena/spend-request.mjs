@@ -66,7 +66,7 @@ const ISO8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}
 // C0/C1 control chars + Unicode bidi overrides/embeddings/isolates. These are display-layer injection
 // aimed at the HUMAN approval gate (the one gate that can't be fuzzed) — a merchant/amount can read
 // one way in the Telegram/3DS prompt and mean another. Reject them in every human-facing string.
-const UNSAFE_TEXT_RE = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+const UNSAFE_TEXT_RE = /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/;
 
 // refuse(reason) — the single shape every rejection takes. Fail closed.
 function refuse(reason) {
@@ -193,22 +193,26 @@ function findDuplicateKey(text) {
   return null;
 }
 
-// validateSpendRequestText(text, opts) — size-check, dup-key check, parse, then validate. Fails closed.
+// validateSpendRequestText(text, opts) — size-check, PARSE, dup-key check, then validate. Fails closed.
 export function validateSpendRequestText(text, opts = {}) {
   if (typeof text !== "string") return refuse("input is not text");
   // Byte length (not char count) — a multibyte payload must be capped by what it actually weighs.
   if (Buffer.byteLength(text, "utf8") > MAX_INPUT_BYTES) {
     return refuse(`input exceeds ${MAX_INPUT_BYTES} bytes — refusing before parse`);
   }
-  const dup = findDuplicateKey(text);
-  if (dup !== null) {
-    return refuse(`duplicate JSON key "${dup}" — the reviewed document and the parsed object would differ (last-wins)`);
-  }
+  // PARSE FIRST, then scan for duplicate keys. Order matters: JSON.parse rejects all malformed input
+  // (unbalanced braces, stray '}'), so the dup scanner only ever runs on text that is known-valid JSON
+  // — it cannot underflow its brace stack or mis-track keys on garbage. (A prior order ran the scanner
+  // on raw text and left "structural oddity → proceed" as a soft edge; parsing first removes it.)
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (e) {
     return refuse(`unparseable JSON: ${e.message}`);
+  }
+  const dup = findDuplicateKey(text);
+  if (dup !== null) {
+    return refuse(`duplicate JSON key "${dup}" — the reviewed document and the parsed object would differ (last-wins)`);
   }
   return validateSpendRequest(parsed, opts);
 }
@@ -245,16 +249,33 @@ export function validateFile(path) {
 // disagree, the CLI would silently no-op, and the gate would exit 0 on a KNOWN-BAD request — a
 // fail-OPEN a cage-match caught. realpathSync on both sides removes that whole class. Fail closed if
 // either path can't be realpath'd.
-function invokedDirectlyCheck() {
-  if (!process.argv[1]) return false;
+// Returns "main" (run the CLI), "import" (do nothing — loaded as a module), or "doubt" (argv[1] is
+// set but we can't resolve it to prove either way). DOUBT MUST REFUSE, not mute: a money-shaped CLI
+// that silently exits 0 when it can't prove it's the entrypoint is a fail-open (the gate itself calls
+// validateFile() and never relies on this, but a human/script running the CLI must still fail closed).
+function invocationMode() {
+  if (!process.argv[1]) return "import"; // e.g. REPL / -e with no script arg
+  let self, arg;
   try {
-    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+    self = realpathSync(fileURLToPath(import.meta.url));
   } catch {
-    return false;
+    return "doubt";
   }
+  try {
+    arg = realpathSync(process.argv[1]);
+  } catch {
+    // argv[1] is set but unresolvable — we were invoked with a script path we can't verify. Can't
+    // prove it's an import of THIS module either, so refuse rather than no-op.
+    return "doubt";
+  }
+  return self === arg ? "main" : "import";
 }
-const invokedDirectly = invokedDirectlyCheck();
-if (invokedDirectly) {
+const mode = invocationMode();
+if (mode === "doubt") {
+  console.error("REFUSED: cannot resolve invocation path — refusing to no-op (fail closed)");
+  process.exit(1);
+}
+if (mode === "main") {
   const path = process.argv[2];
   let res;
   if (path) {
