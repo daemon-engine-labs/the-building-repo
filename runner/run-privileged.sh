@@ -42,7 +42,9 @@ wait_for_docker() {
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
   local token
-  token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)"
+  token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token 2>/dev/null || true)"
+  # Empty token = auth/keychain not ready, NOT a job failure. Return 2 → relaunch, no backoff.
+  [ -n "$token" ] || { echo "[privileged] registration-token mint empty (gh auth/keychain not ready?) — relaunching" >&2; return 2; }
   # DIRECT egress (default bridge, normal NAT) — NOT behind the tinyproxy wall.
   # Rationale: the privileged runner executes only TRUSTED code (allowlisted actors / merged main),
   # so the egress wall (which exists to contain UNtrusted sandbox execution) buys little here and
@@ -72,12 +74,23 @@ run_oneshot() {
   if ! wait_for_docker; then
     exit 1   # infra not ready — bounded by the 120s internal wait; relaunch promptly, no backoff.
   fi
-  if run_job; then
+  local rc
+  run_job; rc=$?
+  if [ "$rc" -eq 0 ]; then
     rm -f "$FAIL_STATE"
     exit 0
   fi
-  local n backoff i
-  n=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
+  # rc==2 → token/auth not ready (not a job failure): relaunch promptly, no backoff.
+  [ "$rc" -eq 2 ] && exit 1
+  # rc==1 → re-probe: an infra blip after the gate is not a job failure, don't charge the backoff.
+  if ! wait_for_docker; then
+    echo "[privileged] failure coincided with infra going unready — relaunching without backoff" >&2
+    exit 1
+  fi
+  local n backoff i raw
+  # Sanitize a corrupt/partial FAIL_STATE so a bad arithmetic expansion can't abort the script.
+  raw="$(tr -cd '0-9' < "$FAIL_STATE" 2>/dev/null)"
+  n=$(( ${raw:-0} + 1 ))
   echo "$n" > "$FAIL_STATE"
   # Arithmetic loop, NOT `seq 2 $n`: BSD/macOS `seq 2 1` counts DOWN, doubling n=1 twice. `for ((...))`
   # yields zero iterations at n=1 as intended.

@@ -83,6 +83,16 @@ launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbo
   narrow on purpose (it only matches `bash`-invoked script processes, so it can't kill an editor that
   has the file open). A runner you started as a bare `./run-sandbox.sh` may survive the reap; it's
   `--ephemeral --replace`, so a stray duplicate self-resolves, but stopping it first avoids the churn.
+- **Reinstall is disruptive to an in-flight job.** After bootout, the installer stops labelled runner
+  containers — a job running at that moment is cut (it re-queues on GitHub). Reinstall during a quiet
+  window, or expect one interrupted build.
+- **Changing `tinyproxy.conf` or `egress-allowlist.txt` needs a proxy recreate.** The egress agent
+  *reuses* a healthy proxy (so a supervisor relaunch never drops live jobs), which means it will not
+  pick up an edited allowlist on its own. Force it: `docker rm -f egress` (the agent re-raises within
+  ~10s with the new config).
+- **~10s between jobs is intentional.** `ThrottleInterval=10` caps the KeepAlive respawn rate, which
+  also spaces clean job-to-job relaunches by ~10s. That's the price of the thrash cap on the failure
+  path; lower it in the plists if you need tighter throughput and accept faster respawn on failures.
 
 ## What makes this a wall, not a fence
 

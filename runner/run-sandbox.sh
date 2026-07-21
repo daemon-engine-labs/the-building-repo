@@ -53,13 +53,23 @@ wait_for_docker() {
     echo "[sandbox] egress proxy not running yet — exiting for relaunch" >&2
     return 1
   }
+  # Running is not enough: the proxy must be BRIDGED onto arena-internal, or the sandbox (which lives
+  # only on arena-internal) still has no route out. A disconnect/recreate race can leave a Running
+  # proxy attached to arena-egress alone — a mute wall. Assert the bridge before we mint a token.
+  [ "$(docker inspect -f '{{if index .NetworkSettings.Networks "arena-internal"}}yes{{end}}' egress 2>/dev/null)" = "yes" ] || {
+    echo "[sandbox] egress proxy not on arena-internal yet (half-wall) — exiting for relaunch" >&2
+    return 1
+  }
 }
 
 # Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
   local token
-  token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)"
+  token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token 2>/dev/null || true)"
+  # Empty token = auth/keychain not ready (e.g. locked login keychain just after reboot), NOT a job
+  # failure. Return 2 so run_oneshot relaunches promptly without charging the failure-backoff.
+  [ -n "$token" ] || { echo "[sandbox] registration-token mint empty (gh auth/keychain not ready?) — relaunching" >&2; return 2; }
   # Host-side --name/--label so cleanup can target THIS runner's containers by service identity
   # rather than by image ancestry (which also matches the privileged runner and manual test
   # containers). $$ = this oneshot's pid → unique per launch.
@@ -91,15 +101,27 @@ run_oneshot() {
   if ! wait_for_docker; then
     exit 1   # infra not ready — bounded by the 120s internal wait; relaunch promptly, no backoff.
   fi
-  if run_job; then
+  local rc
+  run_job; rc=$?
+  if [ "$rc" -eq 0 ]; then
     rm -f "$FAIL_STATE"
     exit 0
   fi
-  # Failed AFTER docker+egress were ready → a real job failure that already minted a token. Back off
-  # exponentially (capped) before exiting so KeepAlive's relaunch cadence — and the token-mint rate —
-  # grows instead of hammering GitHub at a fixed 10s.
-  local n backoff i
-  n=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
+  # rc==2 → token/auth not ready (not a job failure): relaunch promptly, no backoff.
+  [ "$rc" -eq 2 ] && exit 1
+  # rc==1 → run_job failed. Distinguish a real JOB failure from an infra blip that struck AFTER the
+  # gate (colima flap / daemon restart mid-docker-run). Re-probe: if infra is no longer healthy, this
+  # was infra, not the job — relaunch promptly WITHOUT charging the backoff counter.
+  if ! wait_for_docker; then
+    echo "[sandbox] failure coincided with infra going unready — relaunching without backoff" >&2
+    exit 1
+  fi
+  # Real job failure with healthy infra → a token was minted. Back off exponentially (capped) before
+  # exiting so KeepAlive's relaunch cadence — and the token-mint rate — grows instead of a fixed 10s.
+  local n backoff i raw
+  # Sanitize: a corrupt/partial FAIL_STATE must not abort the script via a bad arithmetic expansion.
+  raw="$(tr -cd '0-9' < "$FAIL_STATE" 2>/dev/null)"
+  n=$(( ${raw:-0} + 1 ))
   echo "$n" > "$FAIL_STATE"
   # Arithmetic loop, NOT `seq 2 $n`: BSD/macOS `seq 2 1` counts DOWN ("2 1"), so n=1 would double
   # twice (10→40) instead of staying at BASE. `for ((...))` yields zero iterations at n=1 as intended.

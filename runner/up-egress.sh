@@ -18,7 +18,8 @@ RESTART_POLICY="${EGRESS_RESTART_POLICY:-unless-stopped}"
 docker network inspect arena-internal >/dev/null 2>&1 || docker network create --internal arena-internal
 docker network inspect arena-egress   >/dev/null 2>&1 || docker network create arena-egress
 
-on_internal() { docker inspect -f '{{json .NetworkSettings.Networks}}' egress 2>/dev/null | grep -q '"arena-internal"'; }
+# Structured membership test (not a JSON grep): `index` returns the arena-internal entry or nothing.
+on_internal() { [ "$(docker inspect -f '{{if index .NetworkSettings.Networks "arena-internal"}}yes{{end}}' egress 2>/dev/null)" = "yes" ]; }
 
 # Reuse a HEALTHY proxy — do not destroy the observed service just because a supervisor relaunched.
 # A relaunch of run-egress.sh (e.g. `docker wait` returned transiently) must not drop in-flight

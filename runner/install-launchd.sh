@@ -26,6 +26,14 @@ PLISTBUDDY=/usr/libexec/PlistBuddy
 # Egress FIRST so its wall is up before the runners bootstrap; runners self-heal if it isn't yet.
 AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
 
+# PlistBuddy takes the remainder of its -c line as the value, which safely handles spaces and regex
+# metacharacters (#, &, backslash) — but a newline or a double-quote in a path would break the command
+# grammar. Those are pathological for a filesystem path; reject them explicitly rather than silently
+# writing a corrupt plist, so the "path-safe rewrite" claim is honest.
+case "$REPO_ROOT$LOG_DIR" in
+  *\"*|*$'\n'*) echo "[install] ERROR: REPO_ROOT/LOG_DIR contains a quote or newline; refusing to rewrite plists." >&2; exit 1 ;;
+esac
+
 mkdir -p "$LA_DIR" "$LOG_DIR"
 
 # --- 1. Bootout ALL agents first, then wait for them to actually disappear ------------------------

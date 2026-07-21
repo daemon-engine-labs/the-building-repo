@@ -24,8 +24,9 @@ PROXY_CONTAINER="egress"
 # return makes the launchd agent exit and relaunch (self-healing boot ordering vs colima).
 wait_for_docker() {
   local tries=0
-  hash -r
-  until docker info >/dev/null 2>&1; do
+  # hash -r EACH iteration (matching the runners): colima can move `docker` DURING the wait, and a
+  # one-shot hash -r before the loop would keep the stale path and thrash under KeepAlive.
+  until hash -r; docker info >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -gt 60 ] && { echo "[egress] docker/colima not ready after 120s — exiting for relaunch" >&2; return 1; }
     echo "[egress] waiting for docker/colima ($tries)…"; sleep 2
