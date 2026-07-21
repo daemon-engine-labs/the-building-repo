@@ -74,8 +74,11 @@ run_oneshot() {
   if ! wait_for_docker; then
     exit 1   # infra not ready — bounded by the 120s internal wait; relaunch promptly, no backoff.
   fi
-  local rc
-  run_job; rc=$?
+  # `rc=0; run_job || rc=$?` — NOT `run_job; rc=$?`: under `set -e` a bare `run_job` returning non-zero
+  # aborts the shell before rc is read, making the backoff ladder dead code and reinstating the token
+  # storm. The `|| ` keeps run_job in a set -e-exempt condition context AND captures its code.
+  local rc=0
+  run_job || rc=$?
   if [ "$rc" -eq 0 ]; then
     rm -f "$FAIL_STATE"
     exit 0

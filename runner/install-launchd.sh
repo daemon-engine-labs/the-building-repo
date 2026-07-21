@@ -86,6 +86,12 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     # shellcheck disable=SC2086
     docker stop $old_containers >/dev/null || true
   fi
+  # Force a FRESH egress proxy on install. At runtime up-egress.sh deliberately REUSES a healthy proxy
+  # (so a supervisor relaunch never drops live jobs) — but that means a reinstall from a moved/renamed
+  # checkout, or after editing tinyproxy.conf/allowlist, would otherwise keep supervising the OLD
+  # proxy with stale bind-mount paths. Install is the explicit "something changed" signal, so drop the
+  # proxy here; the egress agent recreates it from THIS checkout when it bootstraps below.
+  docker rm -f egress >/dev/null 2>&1 || true
 fi
 
 # --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
