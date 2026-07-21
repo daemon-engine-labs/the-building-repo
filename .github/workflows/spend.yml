@@ -1,0 +1,178 @@
+name: spend
+
+# The Rail-B (card-present) gate. PHASE P0: validate-only, inert. No secrets, no executor, no card.
+#
+# A build agent's only spend affordance is to write arena/spend-requests/<id>.json (pure data) on its
+# PR branch. This workflow validates that data fail-closed. Money movement (the `execute` job below)
+# is DELIBERATELY not wired yet — it lands in a later, /cage-match-gated phase behind the spend-approval
+# environment, the Telegram approval token, and the issuer 3DS gate. See arena/spend-requests/README.md.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "arena/spend-requests/**"
+      - "arena/spend-request.mjs"
+      - "arena/spend-request.schema.json"
+
+# Default-deny. Validation reads the repo and needs nothing else.
+permissions:
+  contents: read
+
+jobs:
+  # ── VALIDATE ────────────────────────────────────────────────────────────────────
+  # Runs on GitHub-HOSTED ubuntu-latest, NOT a self-hosted runner. This is deliberate:
+  # a pull_request from a fork checks out ATTACKER-AUTHORED code (including spend-request.mjs
+  # itself), so it must run on a disposable, zero-secret VM — never on the self-hosted box that
+  # holds real credentials. (This is the same fork-RCE class triage.yml avoids via `on: issues`.)
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Don't leave the checkout token in .git/config — the next step runs PR-AUTHORED test code,
+          # and even a contents:read token shouldn't sit beside attacker-authored code. The pin step's
+          # `git fetch origin` works anonymously on this public repo, so nothing here needs the token.
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Correctness of the PR's OWN validator code (unit + CLI-wire subprocess cases). Distinct from
+      # the gate below (which runs the TRUSTED origin/main validator over untrusted request data):
+      # this proves the code under review behaves, including the CLI entrypoint the gate depends on.
+      - name: test the validator (unit + CLI wire)
+        run: node --test arena/spend-request.test.mjs
+
+      # The gate is only fail-closed if the JUDGE isn't the thing being judged. The PR branch is
+      # attacker-authorable — a hostile PR could edit its own arena/spend-request.mjs to exit 0 and
+      # bless any request. So run the validator pinned from origin/main (TRUSTED code) against the
+      # PR's request FILES (untrusted data). Explicit refspec populates origin/main reliably (a bare
+      # `git fetch origin main` only sets FETCH_HEAD on some git versions — the self-review workflow
+      # learned this the hard way).
+      - name: pin the trusted validator from origin/main
+        run: |
+          set -euo pipefail
+          # A fetch FAILURE is not a trust-safe state. HARD-FAIL rather than fall back to PR-authored
+          # code on a network blip — a transient failure must never silently swap the judge for the
+          # judged (a cage-match caught this: fetch blip + a PR-tailored validator = the pin is
+          # theatre). Only a fetch that SUCCEEDS but finds no validator on main is a real bootstrap.
+          if ! git fetch -q origin '+refs/heads/main:refs/remotes/origin/main'; then
+            echo "::error::cannot fetch origin/main — refusing to run the spend gate with an unverified validator"
+            exit 1
+          fi
+          # Prove origin/main actually populated — distinguish "fetch didn't give us main" (a fault →
+          # hard-fail) from "main exists but lacks the validator" (a real bootstrap). Without this,
+          # any git error would fall through to the in-tree branch (Wu: cat-file conflates the two).
+          if ! git rev-parse -q --verify origin/main >/dev/null; then
+            echo "::error::origin/main did not resolve after fetch — refusing to run with an unverified validator"
+            exit 1
+          fi
+          if git cat-file -e origin/main:arena/spend-request.mjs 2>/dev/null; then
+            git show origin/main:arena/spend-request.mjs > /tmp/validator.mjs
+            echo "using TRUSTED validator from origin/main"
+          else
+            # origin/main resolved but GENUINELY lacks the validator → real bootstrap. Only a PR that
+            # itself CONTAINS the validator can reach here: `cp` a missing in-tree file hard-fails under
+            # `set -e`, so a concurrent request-only PR (branched from a main without the validator)
+            # fails closed rather than bootstrapping. After the introducing PR merges, this is dead.
+            # That PR is human-reviewed and P0 validation is advisory, so the marginal risk is nil.
+            echo "::warning::bootstrap: origin/main has no arena/spend-request.mjs yet — using the in-tree validator (only a PR that itself adds the validator reaches this; concurrent request-only PRs fail closed)"
+            cp arena/spend-request.mjs /tmp/validator.mjs
+          fi
+          # LANDMINE for the future executor phase: this bootstrap branch runs PR-AUTHORED validator
+          # code. It is acceptable ONLY because P0 is inert ($0, no secret, no card). If this pin step
+          # is ever copied into a money-MOVING job, the bootstrap fallback MUST be deleted — a job that
+          # can spend must NEVER accept an in-tree (petitioner-authored) validator. Trusted ref only.
+          # The gate invokes the validator's EXPLICIT validateFile() export (import + call), NOT the
+          # self-detecting CLI. This removes the gate's dependence on entrypoint heuristics entirely —
+          # a realpath/ENOENT edge in the CLI's "am I main?" check can never turn the gate into a no-op.
+          cat > /tmp/validate-one.mjs <<'JS'
+          import { validateFile } from "/tmp/validator.mjs";
+          const r = validateFile(process.argv[2]);
+          if (!r.ok) { console.error("REFUSED: " + r.reason); process.exit(1); }
+          console.error("OK: " + process.argv[2]);
+          process.exit(0);
+          JS
+
+      # Prove the gate actually refuses, on the EXACT invocation CI uses on real requests. A known-BAD
+      # fixture MUST exit 1; a known-GOOD MUST exit 0. This converts "the validator probably runs" into
+      # "CI fails if it ever silently no-ops" — the self-referential-test-blindness class cannot hide a
+      # dead gate here. (Note: this proves the wire is alive; the trusted-pin above proves the wire runs
+      # MAIN's validator, and CODEOWNERS on /arena/ is the ultimate backstop against a swapped judge.)
+      - name: self-test the gate (fail-closed proof via validateFile)
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          printf '%s' '{"schemaVersion":1,"requestId":"selftest-good","merchant":"2captcha.com","amountCents":50,"item":"selftest","reason":"selftest","issue":1}' > "$d/selftest-good.json"
+          printf '%s' '{"schemaVersion":1,"requestId":"selftest-bad","merchant":"api.openai.com","amountCents":999999,"item":"x","reason":"y","issue":1}' > "$d/selftest-bad.json"
+          if ! node /tmp/validate-one.mjs "$d/selftest-good.json"; then
+            echo "::error::GATE SELF-TEST FAILED: a valid request was refused — the validator is broken"; exit 1
+          fi
+          if node /tmp/validate-one.mjs "$d/selftest-bad.json"; then
+            echo "::error::GATE SELF-TEST FAILED: a KNOWN-BAD request passed (exit 0) — the gate is fail-OPEN"; exit 1
+          fi
+          echo "gate self-test passed: good→exit0, bad→exit1"
+
+      - name: validate every spend-request (recursive, case-insensitive; trusted validator)
+        run: |
+          set -euo pipefail
+          # Enumerate with `find`, not a shell glob: the `paths:` trigger above is `**` (recursive) and
+          # requests match case-insensitively, so a bare `arena/spend-requests/*.json` would MISS a
+          # file at sub/evil.json or evil.JSON that still fired the workflow — a silent fail-open. find
+          # -iname '*.json' matches the trigger's reach exactly.
+          mapfile -t reqs < <(find arena/spend-requests -type f -iname '*.json' 2>/dev/null | sort)
+          if [ "${#reqs[@]}" -eq 0 ]; then
+            echo "No spend-request files present — nothing to validate."
+            exit 0
+          fi
+          rc=0
+          for f in "${reqs[@]}"; do
+            echo "── validating $f"
+            # Requests must live FLAT in arena/spend-requests/ — the (future) executor globs there.
+            # A file in a subdirectory fired the ** trigger but would confuse the executor: refuse it.
+            if [ "$(dirname "$f")" != "arena/spend-requests" ]; then
+              echo "::error file=$f::spend-request must live directly in arena/spend-requests/, not a subdirectory"
+              rc=1
+              continue
+            fi
+            # Trusted validator (origin/main) over untrusted data, via the explicit validateFile
+            # entrypoint (not the self-detecting CLI); it asserts filename stem == requestId.
+            if ! node /tmp/validate-one.mjs "$f"; then
+              echo "::error file=$f::spend-request failed validation"
+              rc=1
+            fi
+          done
+          exit $rc
+
+  # ── EXECUTE (INERT — not wired until a later phase) ──────────────────────────────
+  # The single door that will move money. It is intentionally commented out in P0. When it is built:
+  #   * add a trigger it can actually fire on — it must run on MERGE to main, so this workflow will
+  #     need a `push: { branches: [main], paths: [arena/spend-requests/**] }` trigger added alongside
+  #     the pull_request one above (the pull_request-only trigger here would never run `execute`);
+  #   * run on a SEPARATE principal (the budget-proxy Worker + a card-executor outside the runner),
+  #     never in the general build agent's environment;
+  #   * declare `environment: spend-approval` so it PAUSES for Nick's required-reviewer click and is
+  #     the ONLY workflow that may read the spend token (BUDGET_PROXY_TOKEN lives here, NOT in the
+  #     `privileged` env — see SETUP.md Phase 4/5);
+  #   * re-validate each request with a validator pinned to a REVIEWED base commit — NOT bare
+  #     origin/main, because on push-to-main origin/main IS the just-merged (attacker-influenced) code;
+  #     pin to the pre-merge base SHA, a protected release tag, or an external verifier;
+  #   * require a single-use Telegram HMAC approval token bound to (requestId, amount, merchant), and
+  #     rely on the issuer 3DS push to Nick's phone as the final per-charge gate;
+  #   * enforce a Worker-side LIFETIME counter — the per-request cap here is not a budget, so a
+  #     multi-file / replay burst must be bounded by the atomic Durable Object, not by N human clicks.
+  #
+  # execute:
+  #   needs: validate
+  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  #   runs-on: [self-hosted, spend]
+  #   environment: spend-approval          # required reviewer = Nick; the pause is a feature
+  #   permissions:
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: request approval + move money through the single door
+  #       env:
+  #         BUDGET_PROXY_TOKEN: ${{ secrets.BUDGET_PROXY_TOKEN }}   # ONLY here, never in privileged
+  #       run: node spend/executor/redeem.mjs   # authorizes, escalates to Telegram, redeems 1-use token

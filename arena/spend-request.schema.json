@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://daemon-engine-labs.github.io/schemas/spend-request.schema.json",
+  "title": "arena spend-request (Rail B — card-present)",
+  "_doc": [
+    "A spend-request is the ONLY way a build agent can express a card-present purchase.",
+    "It is PURE DATA the agent writes into arena/spend-requests/<requestId>.json on its PR branch —",
+    "never an action. The agent holds no card and no spend token; its maximum power here is 'author a",
+    "wish'. The wish then faces four independent gates before any money moves: (1) code-owner merge",
+    "of this file, (2) the spend-approval GitHub Environment reviewer, (3) a single-use Telegram HMAC",
+    "approval token bound to (requestId, amountCents, merchant), (4) the issuer 3DS push to Nick's",
+    "phone. See arena/spend-requests/README.md and the plan (the Spend Cage).",
+    "",
+    "THIS FILE IS DOCUMENTATION. The ENFORCING source of truth is arena/spend-request.mjs, which",
+    "validates fail-closed (any deviation => refuse). Keep the two in sync; when they disagree, the",
+    "validator wins."
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "requestId", "merchant", "amountCents", "item", "reason", "issue"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Bump when the shape changes; the validator refuses any other value."
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{6,63}$",
+      "description": "Globally-unique id for this purchase. Binds the capability/approval token so approving request A can never authorize charge B. Must match the filename stem."
+    },
+    "merchant": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 100,
+      "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$",
+      "description": "The merchant host/label the charge targets: 3-100 char ASCII, dot/hyphen-separated alphanumeric labels, no consecutive or edge separators. Re-checked against the POSITIVE allowlist at the Worker (the single door, the real gate); a broad API-credit denylist refuses obvious matches HERE too (defence in depth, fail-safe/over-broad) because 'never buy API credits' is a structural rule, not agent judgment."
+    },
+    "amountCents": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000,
+      "description": "Positive integer cents, never above the PER-REQUEST ceiling (2000, kept equal to the $20 cap so no single request exceeds the whole budget). This is NOT the lifetime cap — the Worker's atomic Durable Object counter is the lifetime total; this bound is a cheap first fail-closed."
+    },
+    "item": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "Human-readable description of what is being bought — shown to Nick at every approval gate. The validator ADDITIONALLY rejects leading/trailing-only whitespace and any control or bidirectional-override characters (display-injection at the human gate); JSON Schema can't express that, so the validator is authoritative."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "Why the build needs this purchase. Shown to Nick at approval time. Same control/bidi-character rejection as item — the validator is authoritative over this schema."
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The issue number this spend serves — traceability from money back to a justifying build task."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Optional ISO-8601 instant (e.g. 2026-07-21T08:00:00Z), informational. The validator enforces it parses — the field must mean what it claims."
+    }
+  }
+}

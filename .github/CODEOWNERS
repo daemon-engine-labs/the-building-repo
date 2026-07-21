@@ -5,3 +5,7 @@
 /allowlist.txt   @nickmeinhold
 /arena/          @nickmeinhold
 /runner/         @nickmeinhold
+# The money-moving executor (the single door). Protected BEFORE it exists or holds any secret, so an
+# agent PR can never introduce the door unreviewed. /arena/ already covers the spend-request validator
+# + intake; /.github/ already covers spend.yml.
+/spend/          @nickmeinhold
