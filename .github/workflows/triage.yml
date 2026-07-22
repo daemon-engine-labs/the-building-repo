@@ -88,7 +88,7 @@ jobs:
           git checkout -b "agent/issue-${ISSUE_NUMBER}"
           # arena/run.mjs reads ISSUE_TITLE/ISSUE_BODY from env (no interpolation).
           AGENT=claude MODE=privileged node arena/run.mjs || echo "arena exited rc=$?"
-      - name: open PR if the forge produced changes
+      - name: open or update PR if the forge produced changes
         id: pr
         run: |
           if [ -z "$(git status --porcelain)" ]; then
@@ -98,9 +98,23 @@ jobs:
           git add -A
           git commit -m "feat: build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" -m "Built by Maxwell (claude) via the arena for #${ISSUE_NUMBER}."
           git push origin "agent/issue-${ISSUE_NUMBER}" --force
-          gh pr create --base main --head "agent/issue-${ISSUE_NUMBER}" \
-            --title "Build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
-            --body "Automated build by the arena (Maxwell/claude) for #${ISSUE_NUMBER}. Review before merge."
+          # Idempotent on re-trigger/re-run: the branch name is stable per issue, so the force-push
+          # above already updated any open PR. `gh pr create` errors on an existing PR — which would
+          # red the whole job for nothing — so only CREATE when none is open yet. Either way an open
+          # PR with fresh changes exists, so we set opened=true and let the self-review below run on
+          # the updated diff (skipping only `create`, never the review, on a re-trigger).
+          existing="$(gh pr list --head "agent/issue-${ISSUE_NUMBER}" --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            echo "PR #${existing} already open for agent/issue-${ISSUE_NUMBER} — updated via push, skipping create."
+          else
+            # `Closes #N` auto-closes the source build-request issue when this PR merges to the
+            # default branch (main) — the merge IS the fulfillment signal, so the request should close.
+            # Kept on ONE line: a 4+-space-indented body line renders as a markdown code block, where
+            # GitHub IGNORES the closing keyword.
+            gh pr create --base main --head "agent/issue-${ISSUE_NUMBER}" \
+              --title "Build for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+              --body "Automated build by the arena (Maxwell/claude) for #${ISSUE_NUMBER}. Review before merge. Closes #${ISSUE_NUMBER}."
+          fi
           echo "opened=true" >> "$GITHUB_OUTPUT"
 
       - name: Maxwell self-review — solo pass (separate reviewer invocation)
