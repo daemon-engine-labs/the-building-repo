@@ -85,9 +85,9 @@ run_oneshot() {
     rm -f "$FAIL_STATE"
     exit 0
   fi
-  # rc==2 → token/auth not ready (not a job failure): relaunch promptly, no backoff.
-  [ "$rc" -eq 2 ] && exit 1
-  # rc==1 → re-probe: an infra blip after the gate is not a job failure, don't charge the backoff.
+  # rc==2 (empty token — auth not ready) and rc==1 (job failed) BOTH fall through to backoff: a
+  # permanent auth failure would otherwise hot-loop the token endpoint every ~10s. rc==1 → also
+  # re-probe so an infra blip after the gate doesn't charge the backoff.
   if ! wait_for_docker; then
     echo "[privileged] failure coincided with infra going unready — relaunching without backoff" >&2
     exit 1

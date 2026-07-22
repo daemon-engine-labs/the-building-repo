@@ -113,11 +113,13 @@ run_oneshot() {
     rm -f "$FAIL_STATE"
     exit 0
   fi
-  # rc==2 → token/auth not ready (not a job failure): relaunch promptly, no backoff.
-  [ "$rc" -eq 2 ] && exit 1
-  # rc==1 → run_job failed. Distinguish a real JOB failure from an infra blip that struck AFTER the
-  # gate (colima flap / daemon restart mid-docker-run). Re-probe: if infra is no longer healthy, this
-  # was infra, not the job — relaunch promptly WITHOUT charging the backoff counter.
+  # rc==2 (empty token — gh auth/keychain not ready) and rc==1 (job failed) BOTH fall through to the
+  # backoff below. A permanent auth failure would otherwise hot-loop `POST .../registration-token`
+  # every ~10s under KeepAlive (hammering a rate-limited endpoint); backing off protects it, and a
+  # transient lock that clears just costs one backoff cycle before the next attempt succeeds and resets.
+  # rc==1 → also distinguish a real JOB failure from an infra blip that struck AFTER the gate (colima
+  # flap mid-docker-run). Re-probe: if infra is no longer healthy, it was infra — relaunch without
+  # charging the backoff counter. (rc==2 with docker still up correctly falls through to backoff.)
   if ! wait_for_docker; then
     echo "[sandbox] failure coincided with infra going unready — relaunching without backoff" >&2
     exit 1

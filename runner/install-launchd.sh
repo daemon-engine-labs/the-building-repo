@@ -126,9 +126,13 @@ for label in "${AGENTS[@]}"; do
   # runners self-heal if it isn't ready (exit + relaunch), but waiting here avoids that launch churn
   # and the noisy failure logs during install. Best-effort: skip if docker isn't reachable.
   if [ "$label" = "com.daemon-engine.arena-egress" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    # Use the SAME three-part readiness predicate the sandbox runner gates on (network exists AND
+    # proxy Running AND bridged onto arena-internal) — a weaker check here would declare the wall up
+    # and bootstrap runners into a half-built network, defeating the whole point of waiting.
     w=0
     until docker network inspect arena-internal >/dev/null 2>&1 \
-          && [ "$(docker inspect -f '{{.State.Running}}' egress 2>/dev/null)" = "true" ]; do
+          && [ "$(docker inspect -f '{{.State.Running}}' egress 2>/dev/null)" = "true" ] \
+          && [ "$(docker inspect -f '{{if index .NetworkSettings.Networks "arena-internal"}}yes{{end}}' egress 2>/dev/null)" = "yes" ]; do
       w=$((w + 1))
       [ "$w" -gt 30 ] && { echo "[install] note: egress wall not up after 30s — runners will self-heal via relaunch" >&2; break; }
       sleep 1
