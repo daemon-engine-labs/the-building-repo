@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable supervisor for the PRIVILEGED arena runner (replaces the fragile nohup loop).
+  Installed to ~/Library/LaunchAgents/ by runner/install-launchd.sh.
+
+  Why launchd: the runner script is oneshot (RUNNER_ONESHOT=1) — register, run one job, exit.
+  launchd IS the loop: KeepAlive relaunches a FRESH process with a correct environment for every
+  job, so the stale-command-hash wedge that killed the nohup loop is structurally impossible.
+
+  PATH is set explicitly because launchd agents inherit a minimal PATH that EXCLUDES
+  /opt/homebrew/bin — where docker, colima, and gh live on this box. Omitting it reproduces the
+  exact "command not found" failure this service exists to prevent.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.daemon-engine.arena-privileged</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nick/git/experiments/the-building-repo/runner/run-privileged.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>RUNNER_ONESHOT</key>
+    <string>1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/nick/git/experiments/the-building-repo</string>
+
+  <!-- Start at login and keep it running: when the oneshot exits after a job, relaunch to
+       re-register. ThrottleInterval caps respawn to once per 10s if a job exits instantly. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/nick/Library/Logs/arena-privileged.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nick/Library/Logs/arena-privileged.log</string>
+</dict>
+</plist>
