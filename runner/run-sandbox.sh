@@ -75,8 +75,10 @@ wait_for_docker() {
 mint_nonce() {
   local out
   out="$(docker exec arena-auth node server.mjs mint 2>/dev/null || true)"
-  # base64url nonce → extract without assuming a JSON parser on the host (portable sed).
-  printf '%s' "$out" | sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p'
+  # Extract the FIRST "nonce":"…" field, dependency-free (no jq/node-on-host-PATH assumption). grep -o
+  # + head -1 grabs only the first match, so stray log lines or multiple JSON objects can't make us
+  # capture the wrong value the way a greedy whole-line sed could (cage-match round 2 — Carnot/Tesla).
+  printf '%s' "$out" | grep -oE '"nonce":"[^"]*"' | head -1 | sed 's/"nonce":"\([^"]*\)"/\1/'
 }
 revoke_nonce() {
   [ -n "${1:-}" ] || return 0
@@ -91,7 +93,10 @@ revoke_nonce() {
 # trap covers normal + set-e exits; INT/TERM revoke then exit (which re-fires EXIT as a no-op,
 # NONCE already cleared).
 NONCE=""
-cleanup_nonce() { [ -n "${NONCE:-}" ] && revoke_nonce "$NONCE"; NONCE=""; }
+# Explicitly TOTAL (always returns 0) so the trap can never be made brittle by revoke's status: under
+# `set -e`, a cleanup that returned non-zero could suppress on_signal's `exit 143` (cage-match round 2 —
+# Carnot/Tesla). `if…fi; return 0` makes that independent of any future edit to revoke_nonce.
+cleanup_nonce() { if [ -n "${NONCE:-}" ]; then revoke_nonce "$NONCE" || true; NONCE=""; fi; return 0; }
 on_signal() { cleanup_nonce; exit 143; }
 trap cleanup_nonce EXIT
 trap on_signal INT TERM

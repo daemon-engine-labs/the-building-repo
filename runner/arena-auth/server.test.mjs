@@ -63,6 +63,14 @@ test("data plane: disallowed route → 403 (before nonce check)", async () => {
 // ── pure admission logic (reservation-aware) ──────────────────────────────────────
 test("checkNonce: unknown nonce denied", () => { assert.equal(checkNonce("nope").ok, false); });
 test("checkNonce: revoked denied", () => { const n = mintNonce(); nonces.get(n).revoked = true; assert.equal(checkNonce(n).ok, false); });
+test("checkNonce: expired denied (server TTL is the fail-closed backstop to client revoke)", () => {
+  const n = mintNonce();
+  assert.equal(checkNonce(n).ok, true);          // fresh nonce admits
+  nonces.get(n).expiresAt = Date.now() - 1;      // simulate TTL elapsed (host killed before revoke)
+  const v = checkNonce(n);
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /expired/);
+});
 test("checkNonce: request budget exhaustion denied", () => {
   const n = mintNonce({ maxRequests: 2, maxTokens: 1000000 }); nonces.get(n).requests = 2;
   assert.match(checkNonce(n).reason, /request budget/);

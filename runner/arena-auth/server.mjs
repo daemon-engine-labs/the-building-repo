@@ -61,6 +61,12 @@ const CEIL_MAX_TOKENS = parseInt(process.env.CEIL_MAX_TOKENS || "2000000", 10);
 // Pessimistic per-request token reservation held from admission until the response's real usage is
 // known. Bounds concurrent overshoot on a single nonce to reservation accuracy.
 const RESERVE_TOKENS = parseInt(process.env.RESERVE_TOKENS || "16000", 10);
+// Server-enforced MAXIMUM nonce lifetime (fail-closed by construction). Client-side revoke is a
+// best-effort courtesy — a host killed mid-job (SIGTERM) or a wedged `docker exec revoke` can leave a
+// spendable nonce alive. The TTL is the LAW that bounds that leak regardless of whether revoke ran
+// (cage-match round 2 — Tesla: "revoke is a courtesy; expiry is law"). One hour covers any single
+// build with margin; a leaked nonce dies on its own well before it could matter.
+const NONCE_TTL_MS = parseInt(process.env.NONCE_TTL_MS || "3600000", 10);
 // Hard limits so a hostile sandbox can't OOM/hang the concentrator.
 const MAX_BODY_BYTES = parseInt(process.env.MAX_BODY_BYTES || "1048576", 10); // 1 MiB
 const UPSTREAM_TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10);
@@ -115,6 +121,7 @@ function mintNonce({ maxRequests, maxTokens } = {}) {
     reserved: 0,
     maxTokens: clamp(maxTokens ?? DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS, CEIL_MAX_TOKENS),
     revoked: false,
+    expiresAt: Date.now() + NONCE_TTL_MS, // server-enforced max lifetime — the fail-closed backstop to client revoke
   });
   return nonce;
 }
@@ -134,6 +141,7 @@ function checkNonce(nonce) {
   const entry = nonces.get(nonce);
   if (!entry) return { ok: false, reason: "unknown nonce", code: 401 };
   if (entry.revoked) return { ok: false, reason: "revoked nonce", code: 401 };
+  if (Date.now() > entry.expiresAt) return { ok: false, reason: "expired nonce", code: 401 };
   if (entry.requests >= entry.maxRequests) return { ok: false, reason: "request budget exhausted", code: 429 };
   if (entry.tokens + entry.reserved + RESERVE_TOKENS > entry.maxTokens) return { ok: false, reason: "token budget exhausted", code: 429 };
   return { ok: true, entry };

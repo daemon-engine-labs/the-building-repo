@@ -112,18 +112,31 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          set -uo pipefail
+          # `set -e` ON: the evidence-capture path (rev-parse/add/diff/meta) is security-critical — a
+          # swallowed git failure that uploads a stale/partial patch is worse than a loud abort
+          # (cage-match round 2 — Carnot/Tesla). ONLY the agent command is allowed to fail (below).
+          set -euo pipefail
+          # Scrub the Actions runtime tokens from the AGENT's environment. GITHUB_TOKEN is not an env
+          # var here (never mapped into this step), but the runner injects ACTIONS_* tokens (runtime,
+          # id-token, cache) that a prompt-injected agent could read → write into the diff → artifact.
+          # Unsetting them in THIS shell keeps them off the agent; the later upload-artifact step runs
+          # in its own process and still gets its runtime token, so upload is unaffected (cage-match
+          # round 2 — Tesla: close token-in-env → file → artifact, not just git-extraheader).
+          unset GITHUB_TOKEN GH_TOKEN \
+                ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_CACHE_URL \
+                ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           # Capture the immutable base BEFORE the agent runs, so the patch is the exact delta the
           # sandbox produced regardless of whether the agent edited, staged, or committed.
           BASE_SHA="$(git rev-parse HEAD)"
           echo "base commit: $BASE_SHA"
-          # Propose mode: real isolation is physical (this runner, no secrets), not the flag.
-          AGENT=claude MODE=propose node arena/run.mjs || echo "arena exited rc=$? — propose is best-effort; capturing whatever diff exists"
+          # Propose mode: real isolation is physical (this runner, no secrets), not the flag. ONLY this
+          # command may fail without aborting — everything else is under set -e.
+          if ! AGENT=claude MODE=propose node arena/run.mjs; then
+            echo "arena exited non-zero — propose is best-effort; capturing whatever diff exists"
+          fi
           # Stage everything (incl. new files) and diff the index against the pre-run base → the full
           # proposal as a single text patch, whether the agent left it staged, unstaged, or committed.
           git add -A
-          # No `|| true` needed: this step runs without `set -e`, and `git diff` (no --exit-code)
-          # returns 0 even when there ARE changes, so it never aborts the step (cage-match — Kelvin).
           git diff --cached "$BASE_SHA" > "$RUNNER_TEMP/proposed.patch"
           if [ ! -s "$RUNNER_TEMP/proposed.patch" ]; then
             echo "::warning::propose produced no diff for #${ISSUE_NUMBER} — nothing to publish"
@@ -145,7 +158,10 @@ jobs:
           path: |
             ${{ runner.temp }}/proposed.patch
             ${{ runner.temp }}/meta.json
-          if-no-files-found: warn
+          # error, not warn: the forge step always writes BOTH files (proposed.patch may be 0 bytes for
+          # an empty proposal, but it exists), so a MISSING file means the capture genuinely failed —
+          # that must fail loud, never a green run with no evidence (cage-match round 2 — Carnot).
+          if-no-files-found: error
           retention-days: 7
 
   # ── TRUSTED: privileged build ───────────────────────────────────────────────────
