@@ -116,20 +116,40 @@ fi
 # lands current. Fail-CLOSED: if we cannot establish a clean deploy tree, abort — better no runners
 # than runners on an unknown tree.
 git -C "$REPO_ROOT" fetch --quiet origin main || { echo "[install] ERROR: git fetch origin main failed — cannot establish deploy worktree." >&2; exit 1; }
-# Ask git directly whether $DEPLOY_ROOT is already a worktree (do NOT string-match `worktree list`
-# porcelain output — on macOS /var symlinks to /private/var, so a path compare there silently misses).
-if [ -d "$DEPLOY_ROOT" ] && git -C "$DEPLOY_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Recognize an existing deploy tree ONLY as a LINKED worktree of THIS repo — a linked worktree's .git
+# is a FILE (a gitdir: pointer), whereas a standalone clone's .git is a DIRECTORY. Testing
+# `--is-inside-work-tree` alone is true for ANY git checkout, so an unrelated standalone clone at
+# $DEPLOY_ROOT would be fast-forwarded toward OUR origin/main (Tesla). Require the .git-FILE marker AND
+# that its common dir belongs to $REPO_ROOT, else refuse.
+DEPLOY_IS_LINKED_WORKTREE=0
+if [ -f "$DEPLOY_ROOT/.git" ]; then
+  _common="$(git -C "$DEPLOY_ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+  _repo_git="$(git -C "$REPO_ROOT" rev-parse --git-dir 2>/dev/null || true)"
+  # Compare resolved absolute paths (macOS /var→/private/var symlink-safe).
+  if [ -n "$_common" ] && [ -n "$_repo_git" ] \
+     && [ "$(cd "$_common" 2>/dev/null && pwd -P)" = "$(cd "$_repo_git" 2>/dev/null && pwd -P)" ]; then
+    DEPLOY_IS_LINKED_WORKTREE=1
+  fi
+fi
+if [ "$DEPLOY_IS_LINKED_WORKTREE" = "1" ]; then
   echo "[install] deploy worktree exists at $DEPLOY_ROOT — fast-forwarding to origin/main"
-  git -C "$DEPLOY_ROOT" merge --ff-only origin/main >/dev/null 2>&1 \
-    || git -C "$DEPLOY_ROOT" checkout --detach origin/main >/dev/null 2>&1 \
-    || { echo "[install] ERROR: could not advance deploy worktree to origin/main." >&2; exit 1; }
+  # ff-only ONLY. Do NOT fall back to `checkout --detach origin/main`: that would silently discard any
+  # local commits in the deploy tree (Carnot HIGH — fail-OPEN on the exact anomaly the guard exists to
+  # surface). Mirror arena-autopull.sh's fail-closed stance: refuse loudly, keep git's real error.
+  if ! _ffout="$(git -C "$DEPLOY_ROOT" merge --ff-only origin/main 2>&1)"; then
+    echo "[install] ERROR: deploy worktree at $DEPLOY_ROOT could not fast-forward to origin/main — it may have diverged (local commits?). Resolve by hand; refusing to force." >&2
+    echo "[install]        git said: $_ffout" >&2
+    exit 1
+  fi
 elif [ -e "$DEPLOY_ROOT" ]; then
-  echo "[install] ERROR: $DEPLOY_ROOT exists but is not a registered git worktree — refusing to clobber it." >&2
+  echo "[install] ERROR: $DEPLOY_ROOT exists but is not a linked worktree of $REPO_ROOT (a standalone clone or foreign dir?) — refusing to clobber it." >&2
   exit 1
 else
   echo "[install] creating deploy worktree at $DEPLOY_ROOT (detached @ origin/main)"
-  git -C "$REPO_ROOT" worktree add --detach "$DEPLOY_ROOT" origin/main >/dev/null 2>&1 \
-    || { echo "[install] ERROR: git worktree add failed for $DEPLOY_ROOT." >&2; exit 1; }
+  if ! _wtout="$(git -C "$REPO_ROOT" worktree add --detach "$DEPLOY_ROOT" origin/main 2>&1)"; then
+    echo "[install] ERROR: git worktree add failed for $DEPLOY_ROOT. git said: $_wtout" >&2
+    exit 1
+  fi
 fi
 
 # --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
@@ -186,9 +206,11 @@ for label in "${AGENTS[@]}"; do
 done
 
 echo
-echo "[install] done. Verify with:"
+echo "[install] done. Deploy worktree: $DEPLOY_ROOT (services exec from here, not $REPO_ROOT). Verify with:"
 echo "  launchctl print $DOMAIN/com.daemon-engine.arena-egress | grep -E 'state|pid'"
 echo "  launchctl print $DOMAIN/com.daemon-engine.arena-auth | grep -E 'state|pid'"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-autopull | grep -E 'state|pid'  # merge→run daemon"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-sandbox | grep -E 'ProgramArguments' -A2  # points at $DEPLOY_ROOT"
 echo "  docker ps --filter name=egress --filter name=arena-auth  # wall + spend-boundary proxies up"
 echo "  gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'"
-echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log"
+echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log $LOG_DIR/arena-autopull.log"

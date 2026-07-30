@@ -48,10 +48,12 @@ drift_stamp() {
     echo "[sandbox] drift-stamp: $SCRIPT_DIR is not a git worktree — skipping" >&2
     return 0
   fi
-  if [ -n "$ref" ] && [ "$run" != "$ref" ]; then
+  if [ -z "$ref" ]; then
+    echo "[sandbox] running SHA $run (origin/main UNRESOLVED — no local ref; drift cannot be checked, not a clean bill)" >&2
+  elif [ "$run" != "$ref" ]; then
     echo "[sandbox] ⚠ DRIFT: running SHA $run != origin/main $ref — this process predates a merge; arena-autopull should relaunch it" >&2
   else
-    echo "[sandbox] running SHA $run (origin/main ${ref:-unknown})" >&2
+    echo "[sandbox] running SHA $run (origin/main $ref) — in sync" >&2
   fi
   return 0
 }

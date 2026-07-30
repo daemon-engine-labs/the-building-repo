@@ -51,7 +51,10 @@ command -v docker >/dev/null|| { log "docker not on PATH — exiting"; exit 1; }
 }
 
 # --- 1. Fetch + detect drift -----------------------------------------------------------------------
-git -C "$DEPLOY_ROOT" fetch --quiet origin main 2>/dev/null || { log "fetch failed (network?) — exiting, will retry next tick"; exit 0; }
+# `timeout` bounds every network call: launchd will not overlap ticks for the same label, so a hung
+# TLS fetch/API call would otherwise FREEZE merge→run integrity until the socket dies (Tesla). 60s for
+# fetch (can be a real pull), 30s for the runner-state API below.
+timeout 60 git -C "$DEPLOY_ROOT" fetch --quiet origin main 2>/dev/null || { log "fetch failed/timed out (network?) — exiting, will retry next tick"; exit 0; }
 LOCAL="$(git -C "$DEPLOY_ROOT" rev-parse HEAD 2>/dev/null || true)"
 REMOTE="$(git -C "$DEPLOY_ROOT" rev-parse origin/main 2>/dev/null || true)"
 [ -n "$LOCAL" ] && [ -n "$REMOTE" ] || { log "could not resolve HEAD/origin/main — exiting"; exit 1; }
@@ -78,10 +81,24 @@ fi
 # --- 3. Relaunch each IDLE runner onto the merged script; leave busy ones to self-heal --------------
 # Query GitHub for this kind's runner rows (a self-hosted runner appears once with all its labels).
 # We want: does a runner with label <ghlabel> exist, and is it busy? jq-free parse via gh -q.
-runner_state() {   # prints "<id> <busy>" lines for runners carrying the given label
-  local ghlabel="$1"
-  gh api "repos/$REPO/actions/runners" \
-    -q ".runners[] | select(any(.labels[]; .name == \"$ghlabel\")) | \"\(.id) \(.busy)\"" 2>/dev/null || true
+# runner_state prints "<id> <busy>" lines for every runner carrying the label, and its EXIT STATUS is
+# load-bearing: a non-zero return (network / API / timeout) means "I could not read the full roster",
+# which the caller treats as fail-CLOSED (skip). `--paginate` is REQUIRED for completeness: the default
+# page is ~30 rows, and the SIGKILL-orphan pathology this daemon exists to clean is exactly how the
+# roster swells past one page — deciding busy on page 1 alone could miss a busy=true on page 2 and
+# fail-OPEN into a hard relaunch (Tesla). Fail-closed means COMPLETE, not merely non-empty
+# (concept_default_deny_completeness_on_hand_rolled_parsers). No `|| true`: the status must propagate.
+runner_state() {   # $1=ghlabel; stdout = rows, exit status = did we read the whole roster
+  timeout 30 gh api --paginate "repos/$REPO/actions/runners" \
+    -q ".runners[] | select(any(.labels[]; .name == \"$1\")) | \"\(.id) \(.busy)\""
+}
+
+# De-register a set of IDLE runner ids from GitHub. Safe even next to a busy sibling: GitHub refuses to
+# DELETE a runner that is currently running a job (422), so a mis-identified id can never drop a live
+# job; and this touches only registrations, never containers. Bounded by `timeout`.
+deregister_idle() {   # $@ = runner ids
+  local rid
+  for rid in "$@"; do timeout 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
 }
 
 for spec in "${RUNNERS[@]}"; do
@@ -91,27 +108,44 @@ for spec in "${RUNNERS[@]}"; do
   # fresh container the relaunch creates.
   old_containers="$(docker ps -q --filter "label=arena-runner=$kind" 2>/dev/null || true)"
 
-  # Decide from GitHub's authoritative busy field. Fail-CLOSED: any parse trouble → treat as busy.
+  # Read the FULL roster. A failed/partial read is fail-CLOSED: skip this kind entirely (Tesla — a
+  # partial page is not a fail-closed read).
+  rows="$(runner_state "$ghlabel")"; rs_rc=$?
+  if [ "$rs_rc" -ne 0 ]; then
+    log "$kind: runner-state query failed (rc=$rs_rc — network/API/timeout) — skipping this tick (fail-closed)"
+    continue
+  fi
+
   busy_any=0 idle_ids=""
   while read -r rid rbusy; do
     [ -n "$rid" ] || continue
-    if [ "$rbusy" = "false" ]; then
-      idle_ids="$idle_ids $rid"
-    else
-      busy_any=1
-    fi
-  done <<<"$(runner_state "$ghlabel")"
+    if [ "$rbusy" = "false" ]; then idle_ids="$idle_ids $rid"; else busy_any=1; fi
+  done <<<"$rows"
 
+  # A BUSY sibling means we must NOT kickstart (never interrupt a live build) — but a stale IDLE
+  # registration is schedulable on old code and IS the failure this daemon prevents, so de-register it
+  # regardless of the busy sibling (Carnot HIGH — a label-wide busy veto left idle orphans online). We
+  # deliberately do NOT touch containers here: we cannot cheaply tell the busy runner's container from
+  # an orphan's by label alone, and a de-registered idle runner is already unschedulable, so its
+  # container is inert until the next no-busy tick reaps it.
   if [ "$busy_any" = "1" ]; then
-    log "$kind: a runner is BUSY — skipping relaunch this tick (it self-heals on job completion)"
+    if [ -z "${idle_ids// /}" ]; then
+      log "$kind: a runner is BUSY, no idle registrations — self-heals on job completion"
+    elif [ -n "$DRYRUN" ]; then
+      log "[dry-run] $kind: BUSY sibling — would de-register idle registration(s) [${idle_ids# }] (no relaunch, no container reap)"
+    else
+      deregister_idle $idle_ids
+      log "$kind: BUSY sibling — not relaunching; de-registered stale idle registration(s) so they cannot schedule on old code"
+    fi
     continue
   fi
+
   if [ -z "${idle_ids// /}" ]; then
     log "$kind: no idle runner registered yet — launchd will bring one up on merged code; nothing to do"
     continue
   fi
 
-  # Idle + drifted → force a fresh relaunch onto the merged script.
+  # Idle + not busy + drifted → force a fresh relaunch onto the merged script.
   if [ -n "$DRYRUN" ]; then
     log "[dry-run] $kind: idle & drifted — would relaunch (kickstart $label), reap container(s) [$old_containers] + runner id(s) [${idle_ids# }]"
     continue
@@ -120,20 +154,21 @@ for spec in "${RUNNERS[@]}"; do
   # seconds since the first query; kickstart -k would SIGTERM it mid-run. This can't be fully closed
   # without cooperative draining, but the re-check shrinks the window to sub-second. Named tradeoff:
   # the residual worst case is one interrupted job on a merge tick, surfaced by GitHub as a re-runnable
-  # failed run — never a silent corruption, and only on the rare tick where a merge and a job-assignment
-  # collide on a previously-idle runner.
-  if runner_state "$ghlabel" | grep -q ' true$'; then
-    log "$kind: became BUSY just before relaunch — skipping this tick (will heal on its job boundary)"
+  # failed run — never silent corruption. A FAILED re-check is also fail-closed (skip).
+  recheck="$(runner_state "$ghlabel")"; rc_rc=$?
+  if [ "$rc_rc" -ne 0 ] || printf '%s\n' "$recheck" | grep -q ' true$'; then
+    log "$kind: became BUSY or re-check failed just before relaunch — skipping this tick (will heal on its job boundary)"
     continue
   fi
   log "$kind: idle & drifted — relaunching onto merged code"
-  launchctl kickstart -k "$DOMAIN/$label" 2>/dev/null || { log "$kind: kickstart failed — will retry next tick"; continue; }
+  # Do NOT swallow kickstart's stderr — a novel launchd failure must be legible in the log (Kelvin).
+  launchctl kickstart -k "$DOMAIN/$label" || { log "$kind: kickstart failed (see stderr above) — will retry next tick"; continue; }
 
   # Reap the OLD container (launchd's SIGKILL skips docker --rm cleanup, orphaning it — observed) and
   # the OLD idle GitHub registrations, so exactly one live pair per kind remains. Never touch the new
   # container/runner the relaunch just created (we only reap the pre-relaunch captures).
   for c in $old_containers; do docker rm -f "$c" >/dev/null 2>&1 || true; done
-  for rid in $idle_ids; do gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
+  deregister_idle $idle_ids
   log "$kind: relaunched; reaped stale container(s) + registration(s)"
 done
 

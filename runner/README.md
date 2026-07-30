@@ -21,7 +21,7 @@ reachable only to allowlisted hosts.
 
 ```bash
 docker build -t arena-sandbox-runner -f runner/Dockerfile runner
-runner/install-launchd.sh    # installs + starts the egress wall + both runners (three LaunchAgents)
+runner/install-launchd.sh    # installs the egress wall + auth + both runners + autopull (five LaunchAgents); creates the deploy worktree
 ```
 
 Manual / interactive alternative (no launchd — self-looping, Ctrl-C to stop):
@@ -48,30 +48,40 @@ Why launchd fixes it structurally:
 - **Explicit `PATH`** in the plist includes `/opt/homebrew/bin` — launchd's default `PATH` excludes
   it, which would otherwise reproduce the exact "command not found" bug this service prevents.
 
-### Three agents, and why egress is one of them
+### The agents, and why egress is one of them
 
-There are **three** LaunchAgents, not two. The sandbox runner has no route out except through the
-egress wall (`arena-internal` network + tinyproxy proxy), and a reboot tears those down. Nothing used
-to rebuild them — so after a reboot the sandbox runner would find `arena-internal` missing, exit, and
-launchd would relaunch it every 10s **forever** (a thrash, not a self-heal). `com.daemon-engine.arena-egress`
-closes that: `run-egress.sh` raises the wall (`up-egress.sh`) and then `docker wait`s on the proxy, so
-the agent lives exactly as long as the wall and its death re-raises. launchd is the wall's **single**
-supervisor — which is why `up-egress.sh` is told `EGRESS_RESTART_POLICY=no` here (a docker restart
-policy would be a second, fighting supervisor).
+There are **five** LaunchAgents: `arena-egress`, `arena-auth`, `arena-privileged`, `arena-sandbox`, and
+`arena-autopull` (the merge→run daemon — see "Merge→run integrity" below). The sandbox runner has no route out
+except through the egress wall (`arena-internal` network + tinyproxy proxy), and a reboot tears those
+down. Nothing used to rebuild them — so after a reboot the sandbox runner would find `arena-internal`
+missing, exit, and launchd would relaunch it every 10s **forever** (a thrash, not a self-heal).
+`com.daemon-engine.arena-egress` closes that: `run-egress.sh` raises the wall (`up-egress.sh`) and then
+`docker wait`s on the proxy, so the agent lives exactly as long as the wall and its death re-raises.
+launchd is the wall's **single** supervisor — which is why `up-egress.sh` is told
+`EGRESS_RESTART_POLICY=no` here (a docker restart policy would be a second, fighting supervisor).
 
-The installer is **bootout-first**: it unloads all three agents and waits for them to disappear
-*before* touching any process or container, so `KeepAlive` can't resurrect a runner mid-install (the
-race that made the old "just re-run it" claim untrue). Plists are repointed at this checkout with
-`PlistBuddy`, not `sed`, so a checkout path containing regex metacharacters can't corrupt them.
+The installer is **bootout-first**: it unloads all agents and waits for them to disappear *before*
+touching any process or container, so `KeepAlive` can't resurrect a runner mid-install (the race that
+made the old "just re-run it" claim untrue). Plists are repointed at the **deploy worktree** with
+`PlistBuddy`, not `sed`, so a path containing regex metacharacters can't corrupt them.
+
+**Scope of automatic merge→run (honest):** `arena-autopull` auto-relaunches only the two **ephemeral
+runners** (sandbox, privileged) — they idle-cycle safely. The long-lived `arena-egress` / `arena-auth`
+agents also exec from the deploy worktree (so a reinstall runs merged code), but they are NOT
+auto-relaunched on drift — kickstarting the egress wall would briefly drop every sandbox job's only
+route out. Their merged code activates on the next reinstall or container death. **Named residual:** a
+merged fix to `run-egress.sh` / `run-auth.sh` / `tinyproxy.conf` / allowlists can sit dark until then —
+run `install-launchd.sh` to force it live.
 
 ```bash
 runner/install-launchd.sh                                    # install/reload (idempotent, bootout-first)
 launchctl print gui/$(id -u)/com.daemon-engine.arena-egress | grep -E 'state|pid'
+launchctl print gui/$(id -u)/com.daemon-engine.arena-autopull | grep -E 'state|pid'   # merge→run daemon
 docker ps --filter name=egress                               # the wall's proxy should be up
 gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'
-tail -f ~/Library/Logs/arena-{egress,privileged,sandbox}.log
+tail -f ~/Library/Logs/arena-{egress,privileged,sandbox,autopull}.log
 # uninstall:
-launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbox}
+launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,auth,privileged,sandbox,autopull}
 ```
 
 ### Operational caveats
