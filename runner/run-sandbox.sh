@@ -64,6 +64,51 @@ wait_for_docker() {
   }
 }
 
+# Per-job spend nonce from arena-auth (DESIGN.md T1 — the sandbox's spend trust boundary). arena-auth's
+# admin plane is container-LOOPBACK, so only host docker access can mint; this launcher is that place.
+# BEST-EFFORT by design: if arena-auth is down we launch the runner WITHOUT a nonce. The gate and (via
+# the privileged launcher) trusted paths never need model access, so a dead proxy must NOT wedge them —
+# fail-OPEN on availability. But a build-sandbox job that lands token-less simply FAILS to reach a model
+# (fail-CLOSED on security): there is no real-token fallback, ever. The nonce is single-use, budget-
+# capped, and revoked the instant the job ends (mint_nonce/revoke_nonce), so a leaked nonce dies with
+# the job. The proxy clamps every mint to its own server-side ceilings regardless of this request.
+mint_nonce() {
+  local out
+  out="$(docker exec arena-auth node server.mjs mint 2>/dev/null || true)"
+  # Extract the FIRST "nonce":"…" field, dependency-free (no jq/node-on-host-PATH assumption). grep -o
+  # + head -1 grabs only the first match, so stray log lines or multiple JSON objects can't make us
+  # capture the wrong value the way a greedy whole-line sed could (cage-match round 2 — Carnot/Tesla).
+  # Trailing `|| true` is LOAD-BEARING: grep exits 1 on no-match (empty mint = arena-auth down) and
+  # head can SIGPIPE non-zero even on success, both of which — under the script's `set -euo pipefail` —
+  # would make `NONCE="$(mint_nonce)"` abort run_job and WEDGE the runner (incl. gate), breaking the
+  # fail-OPEN-on-availability property. `|| true` forces a 0 exit so an empty nonce falls through to the
+  # token-less launch branch as designed (cage-match round 4 — Tesla: a round-3 regression).
+  printf '%s' "$out" | grep -oE '"nonce":"[^"]*"' | head -1 | sed 's/"nonce":"\([^"]*\)"/\1/' || true
+}
+revoke_nonce() {
+  [ -n "${1:-}" ] || return 0
+  docker exec arena-auth node server.mjs revoke "$1" >/dev/null 2>&1 || true
+}
+
+# Signal-safe nonce cleanup. Revoke on EVERY exit path — normal return, a `set -e` abort,
+# OR a launchd/SIGTERM kill mid-`docker run` (cage-match: revoke was straight-line-only, so
+# a kill leaked a live spend nonce until the proxy's next restart; a revoked nonce also
+# neuters any orphaned --rm container that outlives us, since the proxy rejects it). NONCE is
+# script-GLOBAL so the trap can still see it after run_job's local frame is gone. The EXIT
+# trap covers normal + set-e exits; INT/TERM revoke then exit (which re-fires EXIT as a no-op,
+# NONCE already cleared).
+NONCE=""
+# Explicitly TOTAL (always returns 0) so the trap can never be made brittle by revoke's status: under
+# `set -e`, a cleanup that returned non-zero could suppress on_signal's `exit 143` (cage-match round 2 —
+# Carnot/Tesla). `if…fi; return 0` makes that independent of any future edit to revoke_nonce.
+cleanup_nonce() { if [ -n "${NONCE:-}" ]; then revoke_nonce "$NONCE" || true; NONCE=""; fi; return 0; }
+# Convention-correct exit codes so a supervisor/log can tell a user interrupt (130) from a supervisor
+# termination (143): 128 + signal number (cage-match r3 — Carnot). cleanup_nonce runs first either way.
+on_signal() { cleanup_nonce; exit "${1:-143}"; }
+trap cleanup_nonce EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
 # Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
@@ -75,26 +120,58 @@ run_job() {
   # Host-side --name/--label so cleanup can target THIS runner's containers by service identity
   # rather than by image ancestry (which also matches the privileged runner and manual test
   # containers). $$ = this oneshot's pid → unique per launch.
-  # Token is passed as a docker -e env var and expanded INSIDE the container (single-quoted inner
-  # script), never interpolated into the host's bash -c string — so a token with shell
-  # metacharacters can't break or inject into the command.
+  # The registration token is piped to the container over STDIN and read into a NON-EXPORTED shell var
+  # (never `-e RUNNER_TOKEN`): a `-e` value lands in PID 1's /proc/1/environ, readable by the untrusted
+  # agent (same UID) even after `unset` — a self-hosted runner REGISTRATION credential that could attach
+  # rogue runners. Via stdin it is never in the environment or in the host bash -c string; config.sh
+  # consumes it and exits before ./run.sh (and the job) starts (cage-match round 4 — Carnot HIGH).
   # Remove any stale same-name container (a killed prior script that didn't --rm, then PID reuse) so
   # --name can't collide and wedge us into backoff before the runner can even deregister.
   docker rm -f "arena-sandbox-$$" >/dev/null 2>&1 || true
-  docker run --rm \
+
+  # Mint the per-job spend nonce. Only inject the model-access env when a nonce actually exists — an
+  # empty ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN could read as a mis-set base URL to the CLI, so we
+  # add those -e flags conditionally rather than passing empty strings.
+  local auth_env=()
+  NONCE="$(mint_nonce)"   # script-global so the EXIT/TERM trap can revoke it on a kill mid-job
+  if [ -n "$NONCE" ]; then
+    echo "[sandbox] minted a per-job spend nonce (arena-auth data plane at http://arena-auth:8080)" >&2
+    auth_env=( -e ANTHROPIC_BASE_URL="http://arena-auth:8080" -e ANTHROPIC_AUTH_TOKEN="$NONCE" )
+  else
+    echo "[sandbox] WARNING: arena-auth mint failed/absent — launching token-less; propose builds will have NO model access (never a real-token fallback)" >&2
+  fi
+
+  # NO_PROXY/no_proxy must include arena-auth: the sandbox forces all egress through tinyproxy, whose
+  # allowlist only knows EXTERNAL hosts. arena-auth is an internal docker name on arena-internal, so the
+  # one hop the whole credential-off-sandbox design depends on has to bypass the proxy. BOTH cases are
+  # set because the client matrix is mixed — curl/Python honor lowercase `no_proxy` only, some Node
+  # stacks uppercase only (cage-match: uppercase-only was a half-wired bypass). Harmless when unused.
+  local rc=0
+  # `-i` keeps stdin open; the token is delivered as ONE newline-terminated line (so `read` returns 0
+  # under set -e) and read into a non-exported var inside the container. No -e RUNNER_TOKEN.
+  printf '%s\n' "$token" | docker run --rm -i \
     --name "arena-sandbox-$$" \
     --label arena-runner=sandbox \
     --network arena-internal \
     -e HTTP_PROXY="$PROXY"  -e HTTPS_PROXY="$PROXY" \
     -e http_proxy="$PROXY"  -e https_proxy="$PROXY" \
-    -e NO_PROXY="localhost,127.0.0.1" \
+    -e NO_PROXY="localhost,127.0.0.1,arena-auth" \
+    -e no_proxy="localhost,127.0.0.1,arena-auth" \
     -e ARENA_REPO="$REPO" \
-    -e RUNNER_TOKEN="$token" \
+    ${auth_env[@]+"${auth_env[@]}"} \
     "$IMAGE" bash -c '
+      IFS= read -r RUNNER_TOKEN   # from stdin, NOT the environment — never reaches /proc/1/environ
       ./config.sh --url "https://github.com/$ARENA_REPO" --token "$RUNNER_TOKEN" \
         --labels self-hosted,sandbox --ephemeral --unattended --replace \
-        --name "sandbox-$(hostname)-$$" && ./run.sh
-    '
+        --name "sandbox-$(hostname)-$$" \
+        && unset RUNNER_TOKEN \
+        && ./run.sh
+    ' || rc=$?
+
+  # Revoke the nonce the instant the ephemeral job ends (the EXIT/TERM trap is the backstop for a kill
+  # mid-job). cleanup_nonce revokes + clears NONCE, so the trap is then a no-op. Never changes rc.
+  cleanup_nonce
+  return "$rc"
 }
 
 # One supervised attempt under launchd. Splits "infra not ready" (relaunch fast) from "job failed

@@ -61,6 +61,18 @@ const CEIL_MAX_TOKENS = parseInt(process.env.CEIL_MAX_TOKENS || "2000000", 10);
 // Pessimistic per-request token reservation held from admission until the response's real usage is
 // known. Bounds concurrent overshoot on a single nonce to reservation accuracy.
 const RESERVE_TOKENS = parseInt(process.env.RESERVE_TOKENS || "16000", 10);
+// Server-enforced MAXIMUM nonce lifetime (fail-closed by construction). Client-side revoke is a
+// best-effort courtesy — a host killed mid-job (SIGTERM) or a wedged `docker exec revoke` can leave a
+// spendable nonce alive. The TTL is the LAW that bounds that leak regardless of whether revoke ran
+// (cage-match round 2 — Tesla: "revoke is a courtesy; expiry is law"). One hour covers any single
+// build with margin; a leaked nonce dies on its own well before it could matter. VALIDATED: a
+// non-numeric/negative env would make parseInt NaN → `Date.now() > NaN` is always false → the backstop
+// silently vanishes. Fall back to the 1h default on any non-positive/non-finite value (cage-match r3 —
+// Carnot: a fail-closed control that a typo can disable is not fail-closed).
+const NONCE_TTL_MS = (() => {
+  const v = parseInt(process.env.NONCE_TTL_MS || "3600000", 10);
+  return Number.isFinite(v) && v > 0 ? v : 3600000;
+})();
 // Hard limits so a hostile sandbox can't OOM/hang the concentrator.
 const MAX_BODY_BYTES = parseInt(process.env.MAX_BODY_BYTES || "1048576", 10); // 1 MiB
 const UPSTREAM_TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10);
@@ -106,7 +118,20 @@ function clamp(n, def, ceil) {
   const v = Number.isFinite(n) ? Math.floor(n) : def;
   return Math.max(1, Math.min(v, ceil));
 }
+// Evict revoked/expired entries so the in-memory registry can't grow unbounded. Called on every mint
+// AND on a periodic timer (start()) so the registry is SELF-STABILIZING even when minting pauses — it
+// must not depend on future work arriving to clean up old work (cage-match r3/r4 — Carnot/Kelvin).
+function pruneNonces() {
+  const now = Date.now();
+  for (const [k, e] of nonces) { if (e.revoked || now > e.expiresAt) nonces.delete(k); }
+}
+const SWEEP_MS = (() => {
+  const v = parseInt(process.env.NONCE_SWEEP_MS || "300000", 10); // 5 min default
+  return Number.isFinite(v) && v > 0 ? v : 300000;
+})();
+
 function mintNonce({ maxRequests, maxTokens } = {}) {
+  pruneNonces();
   const nonce = randomBytes(24).toString("base64url");
   nonces.set(nonce, {
     requests: 0,
@@ -115,6 +140,7 @@ function mintNonce({ maxRequests, maxTokens } = {}) {
     reserved: 0,
     maxTokens: clamp(maxTokens ?? DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS, CEIL_MAX_TOKENS),
     revoked: false,
+    expiresAt: Date.now() + NONCE_TTL_MS, // server-enforced max lifetime — the fail-closed backstop to client revoke
   });
   return nonce;
 }
@@ -134,6 +160,7 @@ function checkNonce(nonce) {
   const entry = nonces.get(nonce);
   if (!entry) return { ok: false, reason: "unknown nonce", code: 401 };
   if (entry.revoked) return { ok: false, reason: "revoked nonce", code: 401 };
+  if (Date.now() > entry.expiresAt) return { ok: false, reason: "expired nonce", code: 401 };
   if (entry.requests >= entry.maxRequests) return { ok: false, reason: "request budget exhausted", code: 429 };
   if (entry.tokens + entry.reserved + RESERVE_TOKENS > entry.maxTokens) return { ok: false, reason: "token budget exhausted", code: 429 };
   return { ok: true, entry };
@@ -294,7 +321,7 @@ const adminServer = http.createServer((req, res) => {
       const nonce = mintNonce(payload);
       const e = nonces.get(nonce);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ nonce, maxRequests: e.maxRequests, maxTokens: e.maxTokens }));
+      res.end(JSON.stringify({ nonce, maxRequests: e.maxRequests, maxTokens: e.maxTokens, expiresAt: e.expiresAt }));
       return;
     }
     if (req.method === "POST" && req.url === "/admin/revoke") {
@@ -327,6 +354,9 @@ export function start() {
   }
   dataServer.listen(DATA_PORT, DATA_BIND, () => console.error(`[arena-auth] data plane on ${DATA_BIND}:${DATA_PORT} → ${UPSTREAM_HOST} (allowlisted routes only)`));
   adminServer.listen(ADMIN_PORT, ADMIN_BIND, () => console.error(`[arena-auth] admin plane on ${ADMIN_BIND}:${ADMIN_PORT} (ADMIN_TOKEN-gated, loopback-only by default)`));
+  // Periodic GC so the registry self-stabilizes even if minting pauses (heartbeat idle). unref() so the
+  // timer never keeps the process alive on its own.
+  setInterval(pruneNonces, SWEEP_MS).unref();
 }
 
 // ── local admin CLI (scriptable minting via `docker exec arena-auth node server.mjs mint`) ────────
@@ -343,7 +373,7 @@ function adminCall(route, payload) {
   });
 }
 
-export const _internal = { nonces, mintNonce, checkNonce, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS, ADMIN_TOKEN };
+export const _internal = { nonces, mintNonce, checkNonce, pruneNonces, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS, ADMIN_TOKEN };
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cmd = process.argv[2];

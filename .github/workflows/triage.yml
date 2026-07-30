@@ -37,28 +37,132 @@ jobs:
           fi
 
   # ── UNTRUSTED: propose-only ─────────────────────────────────────────────────────
-  # Zero-secret sandbox runner. Can only open a PR. We assert here that the secrets
-  # context is empty — this is the proof we run BEFORE wiring any real secret.
+  # Zero-secret sandbox runner. It runs the agent in PROPOSE mode against attacker-controllable issue
+  # text, then uploads the resulting diff as an ARTIFACT — it never opens a PR and holds no repo-write
+  # token. A separate privileged publisher (publish.yml, Step 3) applies that artifact behind a
+  # default-deny path allowlist. Model access comes ONLY through the arena-auth proxy: the runner env
+  # (injected host-side by run-sandbox.sh) carries a single-use, budget-capped NONCE — never a real
+  # token (DESIGN.md, findings T1/T2/T4).
   build-sandbox:
     needs: gate
     if: needs.gate.outputs.trusted == 'false'
     runs-on: [self-hosted, sandbox]
+    # T2: strip the workflow-default `issues: write`. This job must not carry any repo-write capability
+    # on the same write→file→artifact channel the credential-off-sandbox design just closed for OAuth.
+    # DELIBERATELY NOT `actions: write`: upload-artifact@v4 authenticates via the runner-injected
+    # ACTIONS_RUNTIME_TOKEN, which `permissions:` does not govern — so contents:read suffices for the
+    # upload. Adding actions:write would hand this hostile-input job the power to cancel/re-run/delete
+    # workflow runs (cage-match: rejected Tesla's actions:write HIGH on the security asymmetry — if the
+    # upload ever needs a scope, Step-4 live-fire surfaces it loudly at zero security cost).
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do NOT persist GITHUB_TOKEN into .git/config as an http.extraheader — even the
+          # contents:read token is a real credential, and leaving it in the working tree hands
+          # the hostile-issue agent a token it could write into the diff→artifact (cage-match T-D).
+          persist-credentials: false
       - name: prove isolation (no secrets reachable)
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           # On the sandbox runner this object must contain only GITHUB_TOKEN (or be empty).
           # If a real provider secret ever appears here, the isolation is broken — fail loud.
-          echo "secrets visible to this job: $SECRETS_JSON"
+          # Print only the KEY NAMES, never the values: a trust-boundary proof must not echo a
+          # secret object into the run log and lean on masking (cage-match — Carnot).
+          echo "secret keys visible to this job: $(node -e 'try{process.stdout.write(Object.keys(JSON.parse(process.env.SECRETS_JSON||"{}")).join(",")||"<none>")}catch(e){process.stdout.write("<unparseable>")}')"
           if echo "$SECRETS_JSON" | grep -qiE 'OAUTH|ANTHROPIC|OPENAI|GEMINI|CARD|BUDGET'; then
             echo "::error::privileged secret leaked into the sandbox path"
             exit 1
           fi
-      # TODO(after gate proven): run the arena in propose mode, then open a PR.
-      # - run: AGENT=claude MODE=propose ISSUE_TITLE="${{ github.event.issue.title }}" node arena/run.mjs
-      #   (issue title/body passed via env, never interpolated into a shell string)
+
+      - name: assert credential-off-sandbox (T4) + proxy present
+        run: |
+          set -euo pipefail
+          # T4 — the spike proved `claude -p` sends its DUMMY token and does NOT fall back to a saved
+          # login only when ~/.claude is empty. Enforce that premise at runtime, belt-and-braces: wipe
+          # any ~/.claude and refuse to run if a real credential is somehow in the env.
+          rm -rf "$HOME/.claude"
+          if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::a real Anthropic credential is present on the sandbox — refusing to run (isolation broken)"
+            exit 1
+          fi
+          # Model access MUST route through the arena-auth proxy nonce. No nonce ⇒ no model, never a
+          # direct-endpoint fallback. Fail loud (a token-less build should error, not silently try direct).
+          if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+            echo "::error::no arena-auth nonce injected — build-sandbox cannot reach a model. Is arena-auth up on the runner host?"
+            exit 1
+          fi
+          # Defense in depth: the base URL must be EXACTLY the internal proxy origin, never a real
+          # Anthropic endpoint. Exact match (not a prefix glob) so a value like
+          # http://arena-auth:8080.evil.example can't satisfy it (cage-match — Tesla).
+          case "$ANTHROPIC_BASE_URL" in
+            http://arena-auth:8080|http://arena-auth:8080/) : ;;
+            *) echo "::error::ANTHROPIC_BASE_URL is not the arena-auth proxy: $ANTHROPIC_BASE_URL"; exit 1 ;;
+          esac
+          echo "credential-off-sandbox verified; model access via arena-auth proxy."
+
+      - name: forge (propose) — Maxwell builds the issue, no PR
+        env:
+          # Issue fields via env — NEVER interpolated into a shell string (injection surface), matching
+          # the privileged path. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are inherited from the
+          # container env the host launcher injected.
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # `set -e` ON: the evidence-capture path (rev-parse/add/diff/meta) is security-critical — a
+          # swallowed git failure that uploads a stale/partial patch is worse than a loud abort
+          # (cage-match round 2 — Carnot/Tesla). ONLY the agent command is allowed to fail (below).
+          set -euo pipefail
+          # Scrub the Actions runtime tokens from the AGENT's environment. GITHUB_TOKEN is not an env
+          # var here (never mapped into this step), but the runner injects ACTIONS_* tokens (runtime,
+          # id-token, cache) that a prompt-injected agent could read → write into the diff → artifact.
+          # Unsetting them in THIS shell keeps them off the agent; the later upload-artifact step runs
+          # in its own process and still gets its runtime token, so upload is unaffected (cage-match
+          # round 2 — Tesla: close token-in-env → file → artifact, not just git-extraheader).
+          unset GITHUB_TOKEN GH_TOKEN \
+                ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_CACHE_URL \
+                ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          # Capture the immutable base BEFORE the agent runs, so the patch is the exact delta the
+          # sandbox produced regardless of whether the agent edited, staged, or committed.
+          BASE_SHA="$(git rev-parse HEAD)"
+          echo "base commit: $BASE_SHA"
+          # Propose mode: real isolation is physical (this runner, no secrets), not the flag. ONLY this
+          # command may fail without aborting — everything else is under set -e.
+          if ! AGENT=claude MODE=propose node arena/run.mjs; then
+            echo "arena exited non-zero — propose is best-effort; capturing whatever diff exists"
+          fi
+          # Stage everything (incl. new files) and diff the index against the pre-run base → the full
+          # proposal as a single text patch, whether the agent left it staged, unstaged, or committed.
+          git add -A
+          git diff --cached "$BASE_SHA" > "$RUNNER_TEMP/proposed.patch"
+          if [ ! -s "$RUNNER_TEMP/proposed.patch" ]; then
+            echo "::warning::propose produced no diff for #${ISSUE_NUMBER} — nothing to publish"
+          else
+            echo "proposed patch: $(wc -c < "$RUNNER_TEMP/proposed.patch") bytes"
+          fi
+          # Metadata for the publisher: issue number is a GitHub-supplied integer — validate it is one
+          # before embedding (never trust issue-derived text unshaped), then bind the artifact to it.
+          if ! printf '%s' "${ISSUE_NUMBER}" | grep -qxE '[0-9]+'; then
+            echo "::error::issue number is not numeric: ${ISSUE_NUMBER}"; exit 1
+          fi
+          printf '{"issue":%s,"agent":"claude","mode":"propose","base":"%s"}\n' "$ISSUE_NUMBER" "$BASE_SHA" > "$RUNNER_TEMP/meta.json"
+
+      - name: upload proposed patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact name binds to the issue; publish.yml (Step 3) reads it from the triggering run.
+          name: proposed-build-${{ github.event.issue.number }}
+          path: |
+            ${{ runner.temp }}/proposed.patch
+            ${{ runner.temp }}/meta.json
+          # error, not warn: the forge step always writes BOTH files (proposed.patch may be 0 bytes for
+          # an empty proposal, but it exists), so a MISSING file means the capture genuinely failed —
+          # that must fail loud, never a green run with no evidence (cage-match round 2 — Carnot).
+          if-no-files-found: error
+          retention-days: 7
 
   # ── TRUSTED: privileged build ───────────────────────────────────────────────────
   # Separate runner that holds secrets. Gated by the allowlist AND by an environment
