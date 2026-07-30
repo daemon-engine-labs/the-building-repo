@@ -190,6 +190,13 @@ test("validatePatch: empty patch → not ok, flagged empty (nothing to publish)"
   assert.equal(v.ok, false);
   assert.equal(v.empty, true);
 });
+test("validatePatch: an AMBIGUOUS diff --git header (filename containing ' b/') is REJECTED fail-closed", () => {
+  // A path literally containing " b/" makes the a/…  b/… split ambiguous → parser must fail closed,
+  // never record a docs/-looking decoy while git apply writes the real path (Carnot r3).
+  const v = validatePatch("diff --git a/docs/x b/arena/y b/docs/x b/arena/y\nindex 1..2 100644\n");
+  assert.equal(v.ok, false);
+  assert.match(v.reasons.join(" "), /ambiguous|unparseable/);
+});
 test("validatePatch: non-empty garbage with no diff header → REJECTED (fail-closed)", () => {
   const v = validatePatch("i am not a patch, just prose the agent emitted\n");
   assert.equal(v.ok, false);

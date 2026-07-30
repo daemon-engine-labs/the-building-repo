@@ -90,9 +90,23 @@ export function parsePatch(text) {
     // emits a/ and b/ prefixes, so we take the two prefixed tokens conservatively.
     if (line.startsWith("diff --git ")) {
       sawDiffHeader = true;
-      const m = /^diff --git (.+) (b\/.+|"b\/.+")$/.exec(line);
-      if (m) { add(m[1]); add(m[2]); }
-      else parseError = parseError || `unparseable diff header: ${line.slice(0, 120)}`;
+      const body = line.slice("diff --git ".length);
+      let ok = false;
+      if (!body.includes('"')) {
+        // Unquoted header: unambiguous ONLY with EXACTLY one " b/" separator and an "a/" prefix. A
+        // filename that itself contains " b/" makes a greedy split ambiguous — git apply would still
+        // write the real path while our parser could record a docs/-looking decoy. Fail-CLOSED on it
+        // (cage-match r3 — Carnot). The post-apply re-gate on canonical git output is the backstop, but
+        // the front gate must be authoritative too, not lean on it.
+        const parts = body.split(" b/");
+        if (parts.length === 2 && parts[0].startsWith("a/")) { add(parts[0]); add("b/" + parts[1]); ok = true; }
+      } else {
+        // Quoted header (path has special chars — rare). Tolerant extract of the two prefixed tokens;
+        // any residual ambiguity is caught by the post-apply re-gate on canonical git output.
+        const m = /^("a\/.*"|a\/\S.*?) ("b\/.*"|b\/\S.*)$/.exec(body);
+        if (m) { add(m[1]); add(m[2]); ok = true; }
+      }
+      if (!ok) parseError = parseError || `ambiguous or unparseable diff --git header: ${line.slice(0, 120)}`;
       continue;
     }
     // NOTE: we deliberately DO NOT parse `--- `/`+++ ` lines. The `diff --git a/X b/Y` header already
