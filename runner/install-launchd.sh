@@ -121,13 +121,20 @@ git -C "$REPO_ROOT" fetch --quiet origin main || { echo "[install] ERROR: git fe
 # `--is-inside-work-tree` alone is true for ANY git checkout, so an unrelated standalone clone at
 # $DEPLOY_ROOT would be fast-forwarded toward OUR origin/main (Tesla). Require the .git-FILE marker AND
 # that its common dir belongs to $REPO_ROOT, else refuse.
+# Resolve a repo's git COMMON dir to an absolute, symlink-canonical path. `--git-common-dir` can be
+# RELATIVE (e.g. ".git"), and it must be resolved relative to THAT repo's dir, not the installer's CWD
+# (Carnot MEDIUM — a relative `cd "$_repo_git"` from outside the repo mis-resolved). And we compare
+# common-dir↔common-dir, never common-dir↔git-dir: run from a SECONDARY worktree, git-dir is
+# `.git/worktrees/<name>` while common-dir is the shared store, so a git-dir compare false-negatives a
+# healthy deploy tree (Tesla). cd into the repo FIRST so a relative common-dir resolves correctly.
+abs_common_dir() {   # $1 = a dir inside a git repo; echoes the canonical absolute git common dir
+  ( cd "$1" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P )
+}
 DEPLOY_IS_LINKED_WORKTREE=0
 if [ -f "$DEPLOY_ROOT/.git" ]; then
-  _common="$(git -C "$DEPLOY_ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
-  _repo_git="$(git -C "$REPO_ROOT" rev-parse --git-dir 2>/dev/null || true)"
-  # Compare resolved absolute paths (macOS /var→/private/var symlink-safe).
-  if [ -n "$_common" ] && [ -n "$_repo_git" ] \
-     && [ "$(cd "$_common" 2>/dev/null && pwd -P)" = "$(cd "$_repo_git" 2>/dev/null && pwd -P)" ]; then
+  _deploy_common="$(abs_common_dir "$DEPLOY_ROOT")"
+  _repo_common="$(abs_common_dir "$REPO_ROOT")"
+  if [ -n "$_deploy_common" ] && [ -n "$_repo_common" ] && [ "$_deploy_common" = "$_repo_common" ]; then
     DEPLOY_IS_LINKED_WORKTREE=1
   fi
 fi

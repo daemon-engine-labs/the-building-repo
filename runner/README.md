@@ -148,11 +148,13 @@ Drift is thus bounded to ≤ ~60s after a merge, and always visible in the runne
 
 ## Verification status
 
-- **Proven live:** the two-runner launchd supervision has run on the host (both agents up, ephemeral
-  runners registering).
-- **Written + locally validated, not yet re-installed live:** the egress LaunchAgent, the bootout-first
-  installer, and the `PlistBuddy` path rewrite in *this* change. They pass `shellcheck`, `plutil -lint`,
-  and a `PlistBuddy`-rewrite dry-run against an adversarial checkout path — but a live `install-launchd.sh`
-  re-run on the runner host is the next gate before calling the three-agent topology done.
+- **Proven live:** the launchd runner supervision has run on the host (agents up, ephemeral runners
+  registering). The sandbox runner was force-relaunched onto merged code this session (merge→run Move 1).
+- **Written + locally validated, not yet re-installed live:** the deploy-worktree cutover, `arena-autopull`,
+  and the drift stamp in *this* change. Verified in isolation (drift stamp clean/⚠DRIFT/unresolved paths,
+  autopull dry-run against a behind worktree, ff-only on detached HEAD, the worktree-identity guard
+  accepting a linked worktree and rejecting a standalone clone) and via a 5-family cage match — but a live
+  `install-launchd.sh` cutover on the runner host is the next gate before calling the five-agent /
+  deploy-worktree topology done. That cutover is what makes merge→run integrity actually active.
 - **Best-known, unconfirmed:** the agent-CLI package names in the `Dockerfile` and the exact tinyproxy
   filter behaviour. Phase 2 proves these on a real runner.

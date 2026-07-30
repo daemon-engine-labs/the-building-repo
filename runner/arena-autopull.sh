@@ -43,10 +43,25 @@ command -v git >/dev/null   || { log "git not on PATH — exiting"; exit 1; }
 command -v gh >/dev/null    || { log "gh not on PATH — exiting"; exit 1; }
 command -v docker >/dev/null|| { log "docker not on PATH — exiting"; exit 1; }
 
-# The deploy worktree must exist and be a real worktree before we touch it. install-launchd.sh
-# creates it; if it is missing we do nothing (fail-closed — never fall back to some other tree).
-[ -d "$DEPLOY_ROOT/.git" ] || git -C "$DEPLOY_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
-  log "deploy worktree $DEPLOY_ROOT is not a git worktree — run install-launchd.sh first; exiting"
+# Portable command bounding. GNU `timeout` is NOT on stock macOS — it ships as `gtimeout` via
+# coreutils, and may be absent entirely (Carnot/Tesla HIGH: a bare `timeout` → "command not found" →
+# every tick soft-fails → the daemon silently never runs). Resolve whichever exists; if NEITHER, run
+# UNBOUNDED rather than disable the daemon — an unbounded network call is a lesser evil than a dead
+# merge→run integrity engine (the hung-TLS case is rare; a missing `timeout` on macOS is the norm).
+TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+[ -n "$TIMEOUT_CMD" ] || log "note: no timeout/gtimeout on PATH — network calls run UNBOUNDED (brew install coreutils for gtimeout)"
+bounded() {   # bounded <seconds> <cmd...> — applies the timeout only if one is available
+  local secs="$1"; shift
+  if [ -n "$TIMEOUT_CMD" ]; then "$TIMEOUT_CMD" "$secs" "$@"; else "$@"; fi
+}
+
+# The deploy worktree must exist and be a LINKED worktree before we touch it (a linked worktree's .git
+# is a FILE, not a dir — matches install-launchd.sh's identity rigor rather than accepting any git
+# checkout; Kelvin: the daemon's guard must be isomorphic to the installer's). install-launchd.sh
+# creates it and validated full repo-ownership at install; here we fail-closed on "not a linked
+# worktree" rather than fall back to some other tree.
+[ -f "$DEPLOY_ROOT/.git" ] && git -C "$DEPLOY_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  log "deploy worktree $DEPLOY_ROOT is not a linked git worktree (.git must be a file) — run install-launchd.sh first; exiting"
   exit 1
 }
 
@@ -54,7 +69,7 @@ command -v docker >/dev/null|| { log "docker not on PATH — exiting"; exit 1; }
 # `timeout` bounds every network call: launchd will not overlap ticks for the same label, so a hung
 # TLS fetch/API call would otherwise FREEZE merge→run integrity until the socket dies (Tesla). 60s for
 # fetch (can be a real pull), 30s for the runner-state API below.
-timeout 60 git -C "$DEPLOY_ROOT" fetch --quiet origin main 2>/dev/null || { log "fetch failed/timed out (network?) — exiting, will retry next tick"; exit 0; }
+bounded 60 git -C "$DEPLOY_ROOT" fetch --quiet origin main 2>/dev/null || { log "fetch failed/timed out (network?) — exiting, will retry next tick"; exit 0; }
 LOCAL="$(git -C "$DEPLOY_ROOT" rev-parse HEAD 2>/dev/null || true)"
 REMOTE="$(git -C "$DEPLOY_ROOT" rev-parse origin/main 2>/dev/null || true)"
 [ -n "$LOCAL" ] && [ -n "$REMOTE" ] || { log "could not resolve HEAD/origin/main — exiting"; exit 1; }
@@ -74,7 +89,11 @@ fi
 if [ -n "$DRYRUN" ]; then
   log "[dry-run] would fast-forward deploy worktree ${LOCAL:0:7} → ${REMOTE:0:7}"
 else
-  git -C "$DEPLOY_ROOT" merge --ff-only origin/main >/dev/null 2>&1 || { log "ff-only merge failed unexpectedly — exiting"; exit 1; }
+  # Capture stderr on failure — divergence is pre-checked above, but permissions/corruption can still
+  # fail here and must be legible, not swallowed into /dev/null (Kelvin).
+  if ! _ffout="$(git -C "$DEPLOY_ROOT" merge --ff-only origin/main 2>&1)"; then
+    log "ff-only merge failed unexpectedly — exiting. git said: $_ffout"; exit 1
+  fi
   log "fast-forwarded deploy worktree ${LOCAL:0:7} → ${REMOTE:0:7}"
 fi
 
@@ -89,7 +108,7 @@ fi
 # fail-OPEN into a hard relaunch (Tesla). Fail-closed means COMPLETE, not merely non-empty
 # (concept_default_deny_completeness_on_hand_rolled_parsers). No `|| true`: the status must propagate.
 runner_state() {   # $1=ghlabel; stdout = rows, exit status = did we read the whole roster
-  timeout 30 gh api --paginate "repos/$REPO/actions/runners" \
+  bounded 30 gh api --paginate "repos/$REPO/actions/runners" \
     -q ".runners[] | select(any(.labels[]; .name == \"$1\")) | \"\(.id) \(.busy)\""
 }
 
@@ -98,7 +117,7 @@ runner_state() {   # $1=ghlabel; stdout = rows, exit status = did we read the wh
 # job; and this touches only registrations, never containers. Bounded by `timeout`.
 deregister_idle() {   # $@ = runner ids
   local rid
-  for rid in "$@"; do timeout 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
+  for rid in "$@"; do bounded 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
 }
 
 for spec in "${RUNNERS[@]}"; do
@@ -110,9 +129,12 @@ for spec in "${RUNNERS[@]}"; do
 
   # Read the FULL roster. A failed/partial read is fail-CLOSED: skip this kind entirely (Tesla — a
   # partial page is not a fail-closed read).
-  rows="$(runner_state "$ghlabel")"; rs_rc=$?
-  if [ "$rs_rc" -ne 0 ]; then
-    log "$kind: runner-state query failed (rc=$rs_rc — network/API/timeout) — skipping this tick (fail-closed)"
+  # MUST use `if ! rows=$(...)`: under `set -euo pipefail` a bare `rows=$(runner_state)` that fails
+  # ABORTS the whole script before a following `rs_rc=$?` can be read, making the fail-closed branch
+  # dead code (Carnot + Tesla HIGH — the classic set-e command-sub trap this subsystem keeps hitting).
+  # The `if` puts the substitution in a set-e-exempt condition context.
+  if ! rows="$(runner_state "$ghlabel")"; then
+    log "$kind: runner-state query failed (network/API/timeout) — skipping this tick (fail-closed)"
     continue
   fi
 
@@ -155,21 +177,25 @@ for spec in "${RUNNERS[@]}"; do
   # without cooperative draining, but the re-check shrinks the window to sub-second. Named tradeoff:
   # the residual worst case is one interrupted job on a merge tick, surfaced by GitHub as a re-runnable
   # failed run — never silent corruption. A FAILED re-check is also fail-closed (skip).
-  recheck="$(runner_state "$ghlabel")"; rc_rc=$?
-  if [ "$rc_rc" -ne 0 ] || printf '%s\n' "$recheck" | grep -q ' true$'; then
+  # Same set-e-safe form as above — a bare `recheck=$(...)` on failure would abort the script, not skip.
+  if ! recheck="$(runner_state "$ghlabel")" || printf '%s\n' "$recheck" | grep -q ' true$'; then
     log "$kind: became BUSY or re-check failed just before relaunch — skipping this tick (will heal on its job boundary)"
     continue
   fi
   log "$kind: idle & drifted — relaunching onto merged code"
+  # ORDER MATTERS (Tesla): de-register the idle runner(s) BEFORE the hard kickstart. `kickstart -k`
+  # SIGKILLs the old process and orphans its --rm container while it is STILL REGISTERED and
+  # schedulable — a job could land on that pre-relaunch container in the window between kickstart and
+  # deregister, then die under `docker rm -f`. De-registering first makes the old runner unschedulable
+  # before we kill it (GitHub 422-protects a true busy mis-id), closing the post-kickstart orphan window.
+  deregister_idle $idle_ids
   # Do NOT swallow kickstart's stderr — a novel launchd failure must be legible in the log (Kelvin).
   launchctl kickstart -k "$DOMAIN/$label" || { log "$kind: kickstart failed (see stderr above) — will retry next tick"; continue; }
-
-  # Reap the OLD container (launchd's SIGKILL skips docker --rm cleanup, orphaning it — observed) and
-  # the OLD idle GitHub registrations, so exactly one live pair per kind remains. Never touch the new
-  # container/runner the relaunch just created (we only reap the pre-relaunch captures).
+  # Reap the OLD container (launchd's SIGKILL skips docker --rm cleanup, orphaning it — observed). The
+  # new container the relaunch creates has a distinct id, so reaping the pre-captured old ids never
+  # touches it.
   for c in $old_containers; do docker rm -f "$c" >/dev/null 2>&1 || true; done
-  deregister_idle $idle_ids
-  log "$kind: relaunched; reaped stale container(s) + registration(s)"
+  log "$kind: de-registered stale runner(s), relaunched, reaped stale container(s)"
 done
 
 exit 0
