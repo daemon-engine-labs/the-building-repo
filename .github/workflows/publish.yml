@@ -1,0 +1,162 @@
+name: publish
+
+# The PRIVILEGED publisher for the UNTRUSTED propose path (DESIGN.md Step 3).
+#
+# build-sandbox (triage.yml) runs an agent on hostile issue text and uploads its diff as an artifact —
+# it opens no PR and holds no repo-write token. THIS workflow turns that artifact into a reviewable PR,
+# but ONLY after arena/publish.mjs passes it through a DEFAULT-DENY path allowlist. `git apply` does not
+# execute a patch — but MERGE is the execution scheduler for the next privileged build, so a patch that
+# rewrites privileged paths (.github/, arena/, agents/, runner/, allowlist.txt, …) is REJECTED here and
+# never becomes a PR. This job runs NO agent and holds NO provider secret.
+#
+# `workflow_run` ALWAYS runs the workflow file + code from the DEFAULT branch (main), regardless of any
+# PR — so an untrusted proposal cannot rewrite this publisher to approve itself. Re-entrancy is safe:
+# opening a PR does not re-trigger triage (`on: issues`) or this workflow (`on: workflow_run` of triage).
+
+on:
+  workflow_run:
+    workflows: [triage]
+    types: [completed]
+
+# Trusted publisher: it needs to READ the triggering run's artifacts (actions:read — the find + download
+# steps hit the Actions API of another run), push a branch, open a PR, and flag the source issue. No
+# agent, no provider secret — so these are the whole capability set. (Contrast build-sandbox, which is
+# UNtrusted and gets contents:read only; actions:read here is a trusted-publisher read capability.)
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  publish:
+    # Only consider a successful triage run. A failed/blocked triage produced nothing to publish.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest   # GitHub-hosted: no self-hosted box, no secrets near the runner host.
+    steps:
+      - uses: actions/checkout@v4   # default branch (workflow_run always) — the code that gates is trusted.
+
+      - name: find the proposed-build artifact on the triggering run
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          # A gate-only or privileged triage run uploads no such artifact — then there is simply nothing
+          # to publish (exit cleanly, no PR). Only build-sandbox uploads proposed-build-<issue>.
+          name="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+                    --jq '.artifacts[].name' | grep -E '^proposed-build-[0-9]+$' | head -1 || true)"
+          if [ -z "$name" ]; then
+            echo "no proposed-build artifact on run ${RUN_ID} — nothing to publish."
+            echo "found=" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=$name" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: download the proposed patch
+        if: steps.find.outputs.found != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.find.outputs.found }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: _incoming
+
+      - name: gate the patch, then apply + open PR (or reject + flag the issue)
+        if: steps.find.outputs.found != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          ARTIFACT_NAME: ${{ steps.find.outputs.found }}
+        run: |
+          set -euo pipefail
+          PATCH="_incoming/proposed.patch"
+          META="_incoming/meta.json"
+          [ -f "$META" ] || { echo "::error::artifact missing meta.json — refusing to publish"; exit 1; }
+          [ -f "$PATCH" ] || { echo "::error::artifact missing proposed.patch — refusing to publish"; exit 1; }
+
+          # IDENTITY comes from the ARTIFACT NAME (proposed-build-<N>), which build-sandbox set from the
+          # trusted github.event.issue.number — NOT from the artifact bytes. meta.json's issue is
+          # attacker-influenceable, so it is only allowed to CONFIRM the name, never to override it
+          # (cage-match — Tesla: identity is not a mutable convenience key). A mismatch = tampering → refuse.
+          ISSUE="$(printf '%s' "$ARTIFACT_NAME" | sed -n 's/^proposed-build-\([0-9]\{1,\}\)$/\1/p')"
+          if [ -z "$ISSUE" ]; then
+            echo "::error::artifact name '${ARTIFACT_NAME}' is not proposed-build-<N> — refusing to publish"; exit 1
+          fi
+          META_ISSUE="$(node -e 'try{const m=JSON.parse(require("fs").readFileSync("_incoming/meta.json","utf8"));process.stdout.write(String(m.issue??""))}catch{process.stdout.write("")}')"
+          if [ "$META_ISSUE" != "$ISSUE" ]; then
+            echo "::error::meta.json issue (${META_ISSUE}) != artifact-name issue (${ISSUE}) — tampered artifact, refusing to publish"
+            exit 1
+          fi
+
+          # THE GATE. publish.mjs is pure validation (default-deny paths + symlink/submodule/exec/binary
+          # + fail-closed parse). Exit 0 ⇒ ok; exit 1 ⇒ rejected with reasons in the JSON verdict.
+          set +e
+          VERDICT="$(node arena/publish.mjs "$PATCH")"
+          RC=$?
+          set -e
+          echo "verdict: $VERDICT"
+
+          if [ "$RC" -ne 0 ]; then
+            EMPTY="$(printf '%s' "$VERDICT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).empty))}catch{process.stdout.write("false")}})')"
+            REASONS="$(printf '%s' "$VERDICT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).reasons||[]).map(r=>"- "+r).join("\n"))}catch{process.stdout.write("- (verdict unparseable)")}} )')"
+            if [ "$EMPTY" = "true" ]; then
+              # An empty proposal is a normal outcome (agent produced no diff) — a quiet note, not an alarm.
+              gh issue comment "$ISSUE" --body "🛠️ The arena's sandbox build for this issue produced **no changes** — nothing to publish. (Untrusted propose path.)" || echo "::warning::could not comment empty-proposal note"
+              echo "empty proposal — no PR."
+              exit 0
+            fi
+            # A rejected proposal is LOUD but not a failure of THIS workflow — the gate did its job.
+            gh issue comment "$ISSUE" --body "$(printf '⛔ **Proposal rejected by the publish gate** — not turned into a PR.\n\nThe sandbox build for this issue produced a patch that the default-deny gate (`arena/publish.mjs`) refused:\n\n%s\n\nUntrusted proposals may touch only product paths; anything that could poison a privileged build (`.github/`, `arena/`, `agents/`, `runner/`, `allowlist.txt`, …) or carries a dangerous mode (symlink/submodule/exec/binary) is refused by construction. To build an infra change, arm the trusted path (add the author to `allowlist.txt`).' "$REASONS")" \
+              || echo "::warning::proposal rejected but the flag comment could not post"
+            echo "proposal rejected — flagged issue #${ISSUE}, no PR."
+            exit 0
+          fi
+
+          # ── ACCEPTED: apply as text in a clean worktree, verify, PR ──────────────────────────────────
+          BRANCH="arena/propose-${ISSUE}"
+          git config user.name "daemon-engine[bot]"
+          git config user.email "daemon-engine@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          # --check FIRST: if the patch no longer applies (main moved since the sandbox based it), refuse
+          # rather than force — fail closed, ask for a rebuild.
+          if ! git apply --check --whitespace=nowarn "$PATCH"; then
+            gh issue comment "$ISSUE" --body "⚠️ The sandbox proposal for this issue no longer applies cleanly to \`main\` (the base moved). Re-run the build to regenerate it." || true
+            echo "patch does not apply — asked for rebuild, no PR."
+            exit 0
+          fi
+          # --index stages EXACTLY the patch's paths (never `git add -A`, which would also stage the
+          # downloaded _incoming/ artifact and then fail the re-validation below). The clean checkout
+          # makes index==HEAD, so --index applies cleanly.
+          git apply --index --whitespace=nowarn "$PATCH"
+
+          # Belt-and-braces: re-run the SAME gate on the APPLIED reality (not a hardcoded path grep, which
+          # would drift from PRODUCT_ALLOW). git diff --cached is only the patch's staged paths; if the
+          # applied diff fails the gate, apply drifted from what we validated — refuse (defense in depth).
+          git diff --cached --patch > "$RUNNER_TEMP/applied.patch"
+          if ! node arena/publish.mjs "$RUNNER_TEMP/applied.patch" >/dev/null; then
+            echo "::error::post-apply diff fails the publish gate (apply drift) — refusing to PR"
+            exit 1
+          fi
+          if [ -z "$(git diff --cached --name-only)" ]; then
+            echo "patch applied but produced no tracked change — nothing to PR."
+            exit 0
+          fi
+
+          git commit -m "propose: build for #${ISSUE} (untrusted sandbox)" \
+                     -m "Applied from the sandbox proposal for #${ISSUE} via the default-deny publish gate. Untrusted origin — review before merge."
+          git push origin "$BRANCH" --force
+
+          # Idempotent: reuse an open PR for this issue's branch, else create one. `Closes #N` fulfils the
+          # source issue on merge (the merge is the fulfillment signal), on ONE line so GitHub honors it.
+          existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)"
+          if [ -n "$existing" ]; then
+            echo "PR #${existing} already open for ${BRANCH} — updated via force-push."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "Propose (untrusted): build for #${ISSUE}" \
+              --body "$(printf '🤖 **Untrusted sandbox proposal** for #%s, published through the default-deny gate (`arena/publish.mjs`).\n\n- Origin: the zero-secret `build-sandbox` path (hostile-input-safe). No real credential was on the runner.\n- The gate confirmed this patch touches only product paths and carries no symlink/submodule/exec/binary.\n- **Still untrusted code** — review the diff on its merits before merging. Closes #%s.' "$ISSUE" "$ISSUE")"
+          fi
+          echo "published proposal for #${ISSUE} → ${BRANCH}."
