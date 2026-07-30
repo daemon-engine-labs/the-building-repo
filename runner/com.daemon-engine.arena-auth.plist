@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable supervisor for arena-auth (the sandbox's spend trust boundary — the container that holds
+  the real Claude token so the sandbox never does). Installed to ~/Library/LaunchAgents/ by
+  runner/install-launchd.sh, which repoints the paths at this checkout + $HOME via PlistBuddy.
+
+  Same shape as com.daemon-engine.arena-egress: run-auth.sh raises the proxy then `docker wait`s on
+  it, so the agent lives exactly as long as the proxy and its death (KeepAlive) re-raises.
+
+  NO SECRETS here: the plist is tracked in git. up-auth.sh sources the real token from ~/.claude/.env
+  and ADMIN_TOKEN from ~/.arena-auth-admin at run time — never from this file.
+
+  PATH is explicit because launchd agents inherit a minimal PATH that EXCLUDES /opt/homebrew/bin,
+  where docker and colima live on this box.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.daemon-engine.arena-auth</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nick/git/experiments/the-building-repo/runner/run-auth.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/nick/git/experiments/the-building-repo</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/nick/Library/Logs/arena-auth.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nick/Library/Logs/arena-auth.log</string>
+</dict>
+</plist>
