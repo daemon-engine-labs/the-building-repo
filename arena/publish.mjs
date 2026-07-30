@@ -37,17 +37,20 @@ export function pathAllowed(p, allow = PRODUCT_ALLOW) {
   if (typeof p !== "string" || p.length === 0) return false;
   if (p.includes("\0")) return false;
   if (p.startsWith("/")) return false;                 // absolute
+  if (p.includes("\\")) return false;                  // backslash (Windows sep / escape shape) — refuse
+  if (p.includes("//")) return false;                  // empty segment — refuse (odd path shape)
+  if (p === "." || p.startsWith("./") || p.includes("/./")) return false; // single-dot segment — refuse
   if (p === ".." || p.startsWith("../") || p.includes("/../") || p.endsWith("/..")) return false; // traversal
   return allow.some((prefix) => p.startsWith(prefix));
 }
 
-// Unquote a git diff path. Git quotes paths with special chars as C-strings ("a\tb"); a quoted path is
-// itself suspicious in an untrusted patch, so we DECODE it (to check it honestly) but the caller still
-// runs it through pathAllowed. Returns the raw string with the a/ or b/ prefix stripped.
-function stripPrefix(raw) {
+// C-unquote a git diff path. Git quotes paths with special chars as C-strings ("a\tb"); a quoted path is
+// itself suspicious in an untrusted patch, so we DECODE it (to check it honestly) — the caller still runs
+// the result through pathAllowed. Used for EVERY path-bearing token (diff --git, rename, copy) so the
+// checks are symmetric (cage-match — Tesla: rename/copy previously skipped this).
+function unquote(raw) {
   let s = raw;
   if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') {
-    // C-unquote just enough to reveal traversal/control chars; unknown escapes pass through literally.
     s = s.slice(1, -1).replace(/\\([\\"ntrbfav0]|[0-7]{1,3}|x[0-9a-fA-F]{2})/g, (m, e) => {
       const map = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", a: "\x07", v: "\v", "0": "\0", "\\": "\\", '"': '"' };
       if (e in map) return map[e];
@@ -55,6 +58,11 @@ function stripPrefix(raw) {
       return String.fromCharCode(parseInt(e, 8));
     });
   }
+  return s;
+}
+// Unquote AND strip the a/ or b/ prefix (for diff --git tokens, which carry it). /dev/null → null.
+function stripPrefix(raw) {
+  let s = unquote(raw);
   if (s === "/dev/null") return null;                  // add/delete sentinel — carries no real path
   if (s.startsWith("a/") || s.startsWith("b/")) s = s.slice(2);
   return s;
@@ -65,12 +73,17 @@ function stripPrefix(raw) {
 // as dangerous is flagged. Returns { paths:Set, flags:{...}, parseError:string|null }.
 export function parsePatch(text) {
   const paths = new Set();
-  const flags = { symlink: false, submodule: false, exec: false, binary: false };
+  const flags = { badMode: null, submodule: false, binary: false };
   let sawDiffHeader = false;
   let parseError = null;
 
   const add = (raw) => { const p = stripPrefix(raw); if (p !== null) paths.add(p); };
-  const lines = text.split("\n");
+  // rename/copy paths carry no a/ b/ prefix but CAN be C-quoted — unquote them (Tesla).
+  const addBare = (raw) => paths.add(unquote(raw));
+  // Split on \r?\n, NOT just \n: a CRLF patch would otherwise leave a trailing \r that breaks the
+  // $-anchored mode regexes below — a symlink/submodule/exec line could slip the gate while every path
+  // still read as docs/ (a real bypass). Normalising line endings closes it.
+  const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     // `diff --git a/X b/Y` — the authoritative pair. Split on " b/" is unsafe for spaces; git always
@@ -82,14 +95,21 @@ export function parsePatch(text) {
       else parseError = parseError || `unparseable diff header: ${line.slice(0, 120)}`;
       continue;
     }
-    if (line.startsWith("--- ")) { add(line.slice(4)); continue; }
-    if (line.startsWith("+++ ")) { add(line.slice(4)); continue; }
-    if (line.startsWith("rename from ") || line.startsWith("copy from ")) { paths.add(line.replace(/^(rename|copy) from /, "")); continue; }
-    if (line.startsWith("rename to ") || line.startsWith("copy to ")) { paths.add(line.replace(/^(rename|copy) to /, "")); continue; }
-    // Dangerous modes. Git symlink=120000, gitlink/submodule=160000, regular exec=100755.
-    if (/^(new file mode|old mode|new mode|deleted file mode) 120000$/.test(line)) flags.symlink = true;
-    if (/^(new file mode|old mode|new mode|deleted file mode) 160000$/.test(line)) flags.submodule = true;
-    if (/^(new file mode|new mode) 100755$/.test(line)) flags.exec = true;
+    // NOTE: we deliberately DO NOT parse `--- `/`+++ ` lines. The `diff --git a/X b/Y` header already
+    // carries every touched path unambiguously, and a header line cannot be forged by hunk content (a
+    // content line always bears a +/-/space marker, so it can't start with `diff --git ` at column 0).
+    // But a hunk ADDED line whose content begins with `++ b/arena/x` renders as `+++ b/arena/x` — if we
+    // treated that as a header we'd falsely reject a legit docs patch that merely SHOWS a diff (this
+    // repo's docs are full of them). Paths come from `diff --git` + rename/copy only (cage-match — Carnot).
+    if (line.startsWith("rename from ") || line.startsWith("copy from ")) { addBare(line.replace(/^(rename|copy) from /, "")); continue; }
+    if (line.startsWith("rename to ") || line.startsWith("copy to ")) { addBare(line.replace(/^(rename|copy) to /, "")); continue; }
+    // DEFAULT-DENY modes (mirror the path philosophy — Tesla: a denylist of a few known-bad modes let
+    // 100700/100711/other +x variants slip). A line that SETS a mode (new file / changed-to mode) may
+    // ONLY set 100644 (a regular non-exec file). Anything else — symlink 120000, submodule 160000, any
+    // executable/other bits — is refused. `old mode`/`deleted file mode` describe prior/removed state
+    // and are harmless, so they are not restricted.
+    const mSet = /^(new file mode|new mode) ([0-7]{6})$/.exec(line);
+    if (mSet && mSet[2] !== "100644") flags.badMode = mSet[2];
     if (/^Subproject commit [0-9a-f]{7,40}$/.test(line)) flags.submodule = true;
     // Binary content — either form git emits.
     if (line.startsWith("GIT binary patch")) flags.binary = true;
@@ -111,10 +131,12 @@ export function validatePatch(text, { allow = PRODUCT_ALLOW, maxBytes = MAX_PATC
 
   const { paths, flags, parseError } = parsePatch(text);
   if (parseError) reasons.push(`unparseable patch (fail-closed): ${parseError}`);
-  if (flags.symlink) reasons.push("patch creates/alters a SYMLINK (mode 120000) — refused");
-  if (flags.submodule) reasons.push("patch creates/alters a SUBMODULE / gitlink (mode 160000) — refused");
-  if (flags.exec) reasons.push("patch sets the EXECUTABLE bit (mode 100755) — refused");
-  if (flags.binary) reasons.push("patch contains BINARY content — refused (text patches only)");
+  if (flags.badMode) {
+    const named = { "120000": "SYMLINK", "160000": "SUBMODULE/gitlink", "100755": "EXECUTABLE" }[flags.badMode];
+    reasons.push(`patch sets a non-regular file mode ${flags.badMode}${named ? ` (${named})` : ""} — only 100644 is allowed`);
+  }
+  if (flags.submodule) reasons.push("patch creates/alters a SUBMODULE / gitlink — refused");
+  if (flags.binary) reasons.push("patch contains BINARY content — refused (untrusted proposals are TEXT-ONLY; media ships via the trusted path)");
 
   const rejected = [...paths].filter((p) => !pathAllowed(p, allow)).sort();
   if (rejected.length) {

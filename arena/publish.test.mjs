@@ -69,13 +69,31 @@ index 1111111..2222222 100644
 -a
 +b
 `;
-const diffQuotedTraversal = `diff --git "a/docs/\\u0000evil" "b/docs/\\u0000evil"
-index 1..2 100644
-`;
 const diffRenameOut = `diff --git a/docs/a.md b/arena/b.mjs
 similarity index 100%
 rename from docs/a.md
 rename to arena/b.mjs
+`;
+// A non-100755 executable mode (Tesla T1): a denylist of {100755} would miss 100700.
+const diffExecSneaky = `diff --git a/docs/x.sh b/docs/x.sh
+new file mode 100700
+index 0000000..1234567
+--- /dev/null
++++ b/docs/x.sh
+@@ -0,0 +1 @@
++#!/bin/sh
+`;
+// A quoted rename that STAYS under docs/ (must be accepted once unquoted — Tesla T4).
+const diffQuotedRenameIn = `diff --git a/docs/old.md b/docs/new.md
+similarity index 100%
+rename from "docs/old.md"
+rename to "docs/new name.md"
+`;
+// A copy OUT to a privileged path (Tesla T4 — copy lines must be gated too).
+const diffCopyOut = `diff --git a/docs/a.md b/agents/claude/persona.md
+similarity index 100%
+copy from docs/a.md
+copy to agents/claude/persona.md
 `;
 
 // ── path allowlist primitive ────────────────────────────────────────────────────
@@ -130,7 +148,27 @@ test("validatePatch: submodule/gitlink REFUSED", () => {
 test("validatePatch: executable bit REFUSED", () => {
   const v = validatePatch(diffExec);
   assert.equal(v.ok, false);
-  assert.match(v.reasons.join(" "), /EXECUTABLE/);
+  assert.match(v.reasons.join(" "), /EXECUTABLE|100755/);
+});
+test("validatePatch: a NON-100755 exec mode (100700) is REFUSED (mode allowlist, not denylist)", () => {
+  const v = validatePatch(diffExecSneaky);
+  assert.equal(v.ok, false);
+  assert.match(v.reasons.join(" "), /100700|only 100644/);
+});
+test("validatePatch: a QUOTED rename staying under docs/ is ACCEPTED (unquote applies to renames)", () => {
+  const v = validatePatch(diffQuotedRenameIn);
+  assert.equal(v.ok, true, v.reasons.join("; "));
+});
+test("validatePatch: a copy OUT to a privileged path is REJECTED", () => {
+  const v = validatePatch(diffCopyOut);
+  assert.equal(v.ok, false);
+  assert.ok(v.rejected.includes("agents/claude/persona.md"), `rejected=${v.rejected}`);
+});
+test("pathAllowed: backslash / double-slash / dot-segment shapes refused", () => {
+  assert.equal(pathAllowed("docs\\evil"), false);
+  assert.equal(pathAllowed("docs//x"), false);
+  assert.equal(pathAllowed("docs/./x"), false);
+  assert.equal(pathAllowed("./docs/x"), false);
 });
 test("validatePatch: binary content REFUSED", () => {
   const v = validatePatch(diffBinary);
@@ -167,6 +205,30 @@ test("parsePatch: quoted path with NUL is decoded and then caught by pathAllowed
   // The C-unquote reveals the control byte; the path then fails pathAllowed (NUL).
   const { paths } = parsePatch('diff --git "a/docs/x" "b/docs/x"\n');
   assert.ok(paths.has("docs/x"));
+});
+test("validatePatch: a docs patch that SHOWS a diff example is NOT falsely rejected", () => {
+  // The added content includes a line that renders as `+++ b/arena/x` (a diff example inside a doc).
+  // Paths come from `diff --git` only, so this stays a docs-only, ACCEPTED patch.
+  const v = validatePatch(
+    "diff --git a/docs/patch-guide.md b/docs/patch-guide.md\n" +
+    "index 1111111..2222222 100644\n" +
+    "--- a/docs/patch-guide.md\n" +
+    "+++ b/docs/patch-guide.md\n" +
+    "@@ -1,1 +1,4 @@\n" +
+    " example:\n" +
+    "+--- a/arena/run.mjs\n" +
+    "+++ b/arena/run.mjs\n" +
+    "+@@ -1 +1 @@\n"
+  );
+  assert.equal(v.ok, true, `should accept; got: ${v.reasons.join("; ")}`);
+  assert.deepEqual(v.paths, ["docs/patch-guide.md"]);
+});
+test("validatePatch: CRLF line endings do NOT smuggle a symlink past the mode check", () => {
+  // A hostile CRLF patch: without \r-normalisation the $-anchored mode regex misses "120000\r".
+  const crlf = diffSymlink.replace(/\n/g, "\r\n");
+  const v = validatePatch(crlf);
+  assert.equal(v.ok, false);
+  assert.match(v.reasons.join(" "), /SYMLINK/);
 });
 test("PRODUCT_ALLOW is intentionally minimal (this repo is mostly privileged machinery)", () => {
   assert.deepEqual(PRODUCT_ALLOW, ["docs/"]);
