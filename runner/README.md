@@ -13,8 +13,9 @@ reachable only to allowlisted hosts.
 | `run-egress.sh` | supervise the egress wall: raise it, then `docker wait` the proxy so its death re-raises |
 | `run-sandbox.sh` | the ephemeral runner: register → run one job → exit (oneshot) or self-loop |
 | `run-privileged.sh` | same, labelled `privileged` (trusted code, direct egress) |
-| `com.daemon-engine.arena-*.plist` | launchd supervisors (egress + sandbox + privileged) — the durable replacement for nohup |
-| `install-launchd.sh` | install/reload all three LaunchAgents (idempotent, bootout-first) |
+| `com.daemon-engine.arena-*.plist` | launchd supervisors (egress + auth + sandbox + privileged + autopull) — the durable replacement for nohup |
+| `arena-autopull.sh` | merge→run integrity daemon — fast-forwards the deploy worktree + relaunches idle runners onto merged code |
+| `install-launchd.sh` | install/reload all LaunchAgents (idempotent, bootout-first); creates the deploy worktree |
 
 ## Bring it up (after `colima start`)
 
@@ -93,6 +94,35 @@ launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbo
 - **~10s between jobs is intentional.** `ThrottleInterval=10` caps the KeepAlive respawn rate, which
   also spaces clean job-to-job relaunches by ~10s. That's the price of the thrash cap on the failure
   path; lower it in the plists if you need tighter throughput and accept faster respawn on failures.
+
+## Merge→run integrity (deploy worktree + autopull)
+
+launchd relaunching a *fresh process* is not the same as the fresh process running *merged* code. The
+supervisor scripts exec from a git working tree, and an **idle ephemeral runner is the one state where
+oneshot never cycles** — it blocks in `./run.sh` waiting for a job, so a merge to `main` never activates
+until the next relaunch, which may never come. Observed live: a sandbox runner sat **8 days** on a
+pre-merge script while the merged security hardening sat un-run on disk. *Merged is not running.*
+
+Two mechanisms close the gap:
+
+- **Deploy worktree (removes the coupling).** The supervised services exec from a dedicated worktree at
+  `$HOME/.arena-deploy` (`ARENA_DEPLOY_ROOT`), **not** the dev checkout. `install-launchd.sh` creates it
+  as a linked worktree detached at `origin/main` and repoints every plist's `ProgramArguments`/
+  `WorkingDirectory` there. Editing or branch-switching the dev checkout can no longer change what the
+  live runner executes.
+- **`arena-autopull.sh` (makes activation deterministic).** A launchd `StartInterval=60` daemon: each
+  tick fetches `origin/main`, and on drift fast-forwards the deploy worktree (`--ff-only`, fail-closed on
+  divergence) and relaunches any **idle** runner onto the merged code. A **busy** runner is left alone —
+  it self-heals for free when its one ephemeral job finishes and launchd relaunches it. Idle-vs-busy is
+  read from GitHub's authoritative `busy` field, not guessed from container internals. Relaunch reaps the
+  orphaned `--rm` container + stale runner registration (launchd's SIGKILL skips docker `--rm` cleanup,
+  which otherwise leaves a stale runner *still online* beside the fresh one). `ARENA_AUTOPULL_DRYRUN=1`
+  previews a tick without mutating anything.
+- **Drift stamp (makes it visible).** `run-sandbox.sh`/`run-privileged.sh` log `running SHA X
+  (origin/main Y)` at registration, and a loud `⚠ DRIFT` line when they differ — read-only, never
+  fetches, fully guarded so it can't wedge the fail-open gate path.
+
+Drift is thus bounded to ≤ ~60s after a merge, and always visible in the runner log meanwhile.
 
 ## What makes this a wall, not a fence
 

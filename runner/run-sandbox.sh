@@ -26,8 +26,35 @@ RUNNER_KIND="sandbox"
 FAIL_STATE="$HOME/.arena-${RUNNER_KIND}.fails"
 BACKOFF_BASE="${ARENA_BACKOFF_BASE:-10}"   # seconds
 BACKOFF_CAP="${ARENA_BACKOFF_CAP:-300}"    # seconds
+# Resolve the worktree we are ACTUALLY executing from (the script's own dir), not $PWD — so the drift
+# stamp reports the tree that runs, which is the whole point when a launchd service execs from a
+# working tree that a merge may have moved past. See runner/README.md "merge→run integrity".
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v gh >/dev/null || { echo "gh CLI required"; exit 1; }
+
+# Log the executing worktree's SHA vs the last-known origin/main so merge→run drift is VISIBLE in the
+# runner log (feedback_service_runs_from_git_working_tree: merged code is not running code). Read-ONLY
+# and it NEVER fetches — registration stays cheap and offline-safe, and arena-autopull.sh owns the
+# fetch+ff+relaunch. Fully `|| true`-guarded and always `return 0`: a detached HEAD, a missing
+# origin/main ref, or a non-repo dir must never abort run_job under `set -e` and wedge the fail-open
+# gate path. The origin/main it compares against is only as fresh as the last fetch (best-effort
+# visibility on the dev tree; kept current by autopull on the deploy worktree).
+drift_stamp() {
+  local run ref
+  run="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  ref="$(git -C "$SCRIPT_DIR" rev-parse --short origin/main 2>/dev/null || true)"
+  if [ -z "$run" ]; then
+    echo "[sandbox] drift-stamp: $SCRIPT_DIR is not a git worktree — skipping" >&2
+    return 0
+  fi
+  if [ -n "$ref" ] && [ "$run" != "$ref" ]; then
+    echo "[sandbox] ⚠ DRIFT: running SHA $run != origin/main $ref — this process predates a merge; arena-autopull should relaunch it" >&2
+  else
+    echo "[sandbox] running SHA $run (origin/main ${ref:-unknown})" >&2
+  fi
+  return 0
+}
 
 # Drop bash's cached command→path table, block until the docker daemon (colima VM) answers, and
 # assert the egress wall exists. `hash -r` re-resolves docker/gh from PATH after any infra restart
@@ -113,6 +140,7 @@ trap 'on_signal 143' TERM
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
   local token
+  drift_stamp   # visible merge→run drift check (read-only, best-effort) before we register
   token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token 2>/dev/null || true)"
   # Empty token = auth/keychain not ready (e.g. locked login keychain just after reboot), NOT a job
   # failure. Return 2 so run_oneshot relaunches promptly without charging the failure-backoff.

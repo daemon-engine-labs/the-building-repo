@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  merge→run integrity daemon (arena-autopull.sh). Installed to ~/Library/LaunchAgents/ by
+  runner/install-launchd.sh.
+
+  Why StartInterval (not KeepAlive): each run is ONE tick — fetch, and if the deploy worktree drifted
+  from origin/main, fast-forward it and relaunch any IDLE runner onto the merged code, then exit.
+  launchd fires it every 60s; it will not start a second copy while one tick is still running (same
+  label), so ticks are self-serializing. Drift is thus bounded to ≤ ~60s after a merge.
+
+  PATH is explicit because launchd agents inherit a minimal PATH that EXCLUDES /opt/homebrew/bin —
+  where git, gh, docker, colima live on this box.
+
+  ARENA_DEPLOY_ROOT is set by install-launchd.sh at install time (defaults to $HOME/.arena-deploy).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.daemon-engine.arena-autopull</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__DEPLOY_ROOT__/runner/arena-autopull.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>ARENA_DEPLOY_ROOT</key>
+    <string>__DEPLOY_ROOT__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__DEPLOY_ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/arena-autopull.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/arena-autopull.log</string>
+</dict>
+</plist>
