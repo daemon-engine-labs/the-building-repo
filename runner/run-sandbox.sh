@@ -64,6 +64,25 @@ wait_for_docker() {
   }
 }
 
+# Per-job spend nonce from arena-auth (DESIGN.md T1 — the sandbox's spend trust boundary). arena-auth's
+# admin plane is container-LOOPBACK, so only host docker access can mint; this launcher is that place.
+# BEST-EFFORT by design: if arena-auth is down we launch the runner WITHOUT a nonce. The gate and (via
+# the privileged launcher) trusted paths never need model access, so a dead proxy must NOT wedge them —
+# fail-OPEN on availability. But a build-sandbox job that lands token-less simply FAILS to reach a model
+# (fail-CLOSED on security): there is no real-token fallback, ever. The nonce is single-use, budget-
+# capped, and revoked the instant the job ends (mint_nonce/revoke_nonce), so a leaked nonce dies with
+# the job. The proxy clamps every mint to its own server-side ceilings regardless of this request.
+mint_nonce() {
+  local out
+  out="$(docker exec arena-auth node server.mjs mint 2>/dev/null || true)"
+  # base64url nonce → extract without assuming a JSON parser on the host (portable sed).
+  printf '%s' "$out" | sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p'
+}
+revoke_nonce() {
+  [ -n "${1:-}" ] || return 0
+  docker exec arena-auth node server.mjs revoke "$1" >/dev/null 2>&1 || true
+}
+
 # Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
@@ -81,20 +100,43 @@ run_job() {
   # Remove any stale same-name container (a killed prior script that didn't --rm, then PID reuse) so
   # --name can't collide and wedge us into backoff before the runner can even deregister.
   docker rm -f "arena-sandbox-$$" >/dev/null 2>&1 || true
+
+  # Mint the per-job spend nonce. Only inject the model-access env when a nonce actually exists — an
+  # empty ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN could read as a mis-set base URL to the CLI, so we
+  # add those -e flags conditionally rather than passing empty strings.
+  local nonce auth_env=()
+  nonce="$(mint_nonce)"
+  if [ -n "$nonce" ]; then
+    echo "[sandbox] minted a per-job spend nonce (arena-auth data plane at http://arena-auth:8080)" >&2
+    auth_env=( -e ANTHROPIC_BASE_URL="http://arena-auth:8080" -e ANTHROPIC_AUTH_TOKEN="$nonce" )
+  else
+    echo "[sandbox] WARNING: arena-auth mint failed/absent — launching token-less; propose builds will have NO model access (never a real-token fallback)" >&2
+  fi
+
+  # NO_PROXY must include arena-auth: the sandbox forces all egress through tinyproxy, whose allowlist
+  # only knows EXTERNAL hosts. arena-auth is an internal docker name on arena-internal, so the one hop
+  # the whole credential-off-sandbox design depends on has to bypass the proxy. Harmless when unused.
+  local rc=0
   docker run --rm \
     --name "arena-sandbox-$$" \
     --label arena-runner=sandbox \
     --network arena-internal \
     -e HTTP_PROXY="$PROXY"  -e HTTPS_PROXY="$PROXY" \
     -e http_proxy="$PROXY"  -e https_proxy="$PROXY" \
-    -e NO_PROXY="localhost,127.0.0.1" \
+    -e NO_PROXY="localhost,127.0.0.1,arena-auth" \
     -e ARENA_REPO="$REPO" \
     -e RUNNER_TOKEN="$token" \
+    ${auth_env[@]+"${auth_env[@]}"} \
     "$IMAGE" bash -c '
       ./config.sh --url "https://github.com/$ARENA_REPO" --token "$RUNNER_TOKEN" \
         --labels self-hosted,sandbox --ephemeral --unattended --replace \
         --name "sandbox-$(hostname)-$$" && ./run.sh
-    '
+    ' || rc=$?
+
+  # Revoke the nonce the instant the ephemeral job ends — bounds the in-memory registry to concurrent
+  # jobs and kills a leaked nonce with its job. Best-effort; never changes the job's exit status.
+  revoke_nonce "$nonce"
+  return "$rc"
 }
 
 # One supervised attempt under launchd. Splits "infra not ready" (relaunch fast) from "job failed

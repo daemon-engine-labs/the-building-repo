@@ -37,12 +37,20 @@ jobs:
           fi
 
   # ── UNTRUSTED: propose-only ─────────────────────────────────────────────────────
-  # Zero-secret sandbox runner. Can only open a PR. We assert here that the secrets
-  # context is empty — this is the proof we run BEFORE wiring any real secret.
+  # Zero-secret sandbox runner. It runs the agent in PROPOSE mode against attacker-controllable issue
+  # text, then uploads the resulting diff as an ARTIFACT — it never opens a PR and holds no repo-write
+  # token. A separate privileged publisher (publish.yml, Step 3) applies that artifact behind a
+  # default-deny path allowlist. Model access comes ONLY through the arena-auth proxy: the runner env
+  # (injected host-side by run-sandbox.sh) carries a single-use, budget-capped NONCE — never a real
+  # token (DESIGN.md, findings T1/T2/T4).
   build-sandbox:
     needs: gate
     if: needs.gate.outputs.trusted == 'false'
     runs-on: [self-hosted, sandbox]
+    # T2: strip the workflow-default `issues: write`. This job must not carry any repo-write capability
+    # on the same write→file→artifact channel the credential-off-sandbox design just closed for OAuth.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: prove isolation (no secrets reachable)
@@ -56,9 +64,73 @@ jobs:
             echo "::error::privileged secret leaked into the sandbox path"
             exit 1
           fi
-      # TODO(after gate proven): run the arena in propose mode, then open a PR.
-      # - run: AGENT=claude MODE=propose ISSUE_TITLE="${{ github.event.issue.title }}" node arena/run.mjs
-      #   (issue title/body passed via env, never interpolated into a shell string)
+
+      - name: assert credential-off-sandbox (T4) + proxy present
+        run: |
+          set -euo pipefail
+          # T4 — the spike proved `claude -p` sends its DUMMY token and does NOT fall back to a saved
+          # login only when ~/.claude is empty. Enforce that premise at runtime, belt-and-braces: wipe
+          # any ~/.claude and refuse to run if a real credential is somehow in the env.
+          rm -rf "$HOME/.claude"
+          if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::a real Anthropic credential is present on the sandbox — refusing to run (isolation broken)"
+            exit 1
+          fi
+          # Model access MUST route through the arena-auth proxy nonce. No nonce ⇒ no model, never a
+          # direct-endpoint fallback. Fail loud (a token-less build should error, not silently try direct).
+          if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+            echo "::error::no arena-auth nonce injected — build-sandbox cannot reach a model. Is arena-auth up on the runner host?"
+            exit 1
+          fi
+          # Defense in depth: the base URL must be the internal proxy, never a real Anthropic endpoint.
+          case "$ANTHROPIC_BASE_URL" in
+            http://arena-auth:8080*) : ;;
+            *) echo "::error::ANTHROPIC_BASE_URL is not the arena-auth proxy: $ANTHROPIC_BASE_URL"; exit 1 ;;
+          esac
+          echo "credential-off-sandbox verified; model access via arena-auth proxy."
+
+      - name: forge (propose) — Maxwell builds the issue, no PR
+        env:
+          # Issue fields via env — NEVER interpolated into a shell string (injection surface), matching
+          # the privileged path. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are inherited from the
+          # container env the host launcher injected.
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          # Capture the immutable base BEFORE the agent runs, so the patch is the exact delta the
+          # sandbox produced regardless of whether the agent edited, staged, or committed.
+          BASE_SHA="$(git rev-parse HEAD)"
+          echo "base commit: $BASE_SHA"
+          # Propose mode: real isolation is physical (this runner, no secrets), not the flag.
+          AGENT=claude MODE=propose node arena/run.mjs || echo "arena exited rc=$? — propose is best-effort; capturing whatever diff exists"
+          # Stage everything (incl. new files) and diff the index against the pre-run base → the full
+          # proposal as a single text patch, whether the agent left it staged, unstaged, or committed.
+          git add -A
+          git diff --cached "$BASE_SHA" > "$RUNNER_TEMP/proposed.patch" || true
+          if [ ! -s "$RUNNER_TEMP/proposed.patch" ]; then
+            echo "::warning::propose produced no diff for #${ISSUE_NUMBER} — nothing to publish"
+          else
+            echo "proposed patch: $(wc -c < "$RUNNER_TEMP/proposed.patch") bytes"
+          fi
+          # Metadata for the publisher: issue number is a GitHub-supplied integer — validate it is one
+          # before embedding (never trust issue-derived text unshaped), then bind the artifact to it.
+          if ! printf '%s' "${ISSUE_NUMBER}" | grep -qxE '[0-9]+'; then
+            echo "::error::issue number is not numeric: ${ISSUE_NUMBER}"; exit 1
+          fi
+          printf '{"issue":%s,"agent":"claude","mode":"propose","base":"%s"}\n' "$ISSUE_NUMBER" "$BASE_SHA" > "$RUNNER_TEMP/meta.json"
+
+      - name: upload proposed patch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact name binds to the issue; publish.yml (Step 3) reads it from the triggering run.
+          name: proposed-build-${{ github.event.issue.number }}
+          path: |
+            ${{ runner.temp }}/proposed.patch
+            ${{ runner.temp }}/meta.json
+          if-no-files-found: warn
+          retention-days: 7
 
   # ── TRUSTED: privileged build ───────────────────────────────────────────────────
   # Separate runner that holds secrets. Gated by the allowlist AND by an environment
