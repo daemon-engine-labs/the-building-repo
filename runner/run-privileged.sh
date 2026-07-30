@@ -38,12 +38,14 @@ drift_stamp() {
     echo "[privileged] drift-stamp: $SCRIPT_DIR is not a git worktree — skipping" >&2
     return 0
   fi
+  # $ref is the LOCAL origin/main tracking ref (fresh only as of the last fetch). Worktree-HEAD proxy
+  # for the running code, not in-memory process identity — labelled so "in sync" isn't over-read.
   if [ -z "$ref" ]; then
-    echo "[privileged] running SHA $run (origin/main UNRESOLVED — no local ref; drift cannot be checked, not a clean bill)" >&2
+    echo "[privileged] worktree SHA $run (local origin/main UNRESOLVED — no ref; drift cannot be checked, not a clean bill)" >&2
   elif [ "$run" != "$ref" ]; then
-    echo "[privileged] ⚠ DRIFT: running SHA $run != origin/main $ref — this process predates a merge; arena-autopull should relaunch it" >&2
+    echo "[privileged] ⚠ DRIFT: worktree SHA $run != local origin/main $ref — this worktree predates a merge; arena-autopull should fast-forward + relaunch" >&2
   else
-    echo "[privileged] running SHA $run (origin/main $ref) — in sync" >&2
+    echo "[privileged] worktree SHA $run == local origin/main $ref (in sync as of last fetch)" >&2
   fi
   return 0
 }

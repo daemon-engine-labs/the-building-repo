@@ -113,7 +113,7 @@ oneshot never cycles** — it blocks in `./run.sh` waiting for a job, so a merge
 until the next relaunch, which may never come. Observed live: a sandbox runner sat **8 days** on a
 pre-merge script while the merged security hardening sat un-run on disk. *Merged is not running.*
 
-Two mechanisms close the gap:
+Three mechanisms close the gap:
 
 - **Deploy worktree (removes the coupling).** The supervised services exec from a dedicated worktree at
   `$HOME/.arena-deploy` (`ARENA_DEPLOY_ROOT`), **not** the dev checkout. `install-launchd.sh` creates it

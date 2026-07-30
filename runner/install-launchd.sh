@@ -7,7 +7,7 @@
 #   2. reap any legacy pre-launchd nohup loops (narrow, bash-invoked matches only).
 #   3. stop old runner containers BY SERVICE LABEL (arena-runner), now that nothing supervised is
 #      live to recreate them.
-#   4. install each plist with paths repointed at THIS checkout + $HOME via PlistBuddy (not sed —
+#   4. install each plist with paths repointed at the DEPLOY worktree ($DEPLOY_ROOT) + $HOME via PlistBuddy (not sed —
 #      no regex-metachar corruption of valid paths).
 #   5. bootstrap egress FIRST (it raises the wall), then the two runners.
 #
@@ -166,7 +166,7 @@ for label in "${AGENTS[@]}"; do
   [ -f "$src" ] || { echo "[install] missing plist: $src" >&2; exit 1; }
   cp "$src" "$dst"
 
-  # Repoint the baked-in default paths at THIS checkout + $HOME. PlistBuddy Set takes literal
+  # Repoint the baked-in default paths at the DEPLOY worktree ($DEPLOY_ROOT) + $HOME. PlistBuddy Set takes literal
   # values — no sed/regex, so a path containing '#', '&', or a backslash cannot corrupt the plist.
   prog_base="$("$PLISTBUDDY" -c "Print :ProgramArguments:0" "$dst")"; prog_base="$(basename "$prog_base")"
   out_base="$("$PLISTBUDDY" -c "Print :StandardOutPath" "$dst")";     out_base="$(basename "$out_base")"

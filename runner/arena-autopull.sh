@@ -26,10 +26,18 @@ REPO="daemon-engine-labs/the-building-repo"
 DEPLOY_ROOT="${ARENA_DEPLOY_ROOT:-$HOME/.arena-deploy}"
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
-# Dry run: report the fast-forward + relaunch decisions WITHOUT mutating anything (no ff, no kickstart,
-# no reap). Useful to preview what a tick would do on a live box, and to verify the daemon's logic in
-# isolation. Any non-empty value enables it.
+# Dry run: report the fast-forward + relaunch/reap decisions WITHOUT changing the running system — no
+# ff of the worktree, no kickstart, no container reap, no runner de-registration. It DOES still `git
+# fetch` (updates the local origin/main tracking ref — a read of the remote, not a change to the
+# worktree or any service), which is how it detects and reports drift. Any non-empty value enables it.
 DRYRUN="${ARENA_AUTOPULL_DRYRUN:-}"
+
+# SCOPE — SINGLE-HOST ASSUMPTION (Carnot cage-match, named constraint): runner_state selects GitHub
+# runners repo-wide by the `sandbox`/`privileged` LABEL, which is not a per-host identity. On this
+# arena's single self-hosted box that is exactly "this host's runners", but if a second host ever
+# registers a runner with the same label, this daemon could de-register it or let its busy state veto a
+# relaunch here. Multi-host requires a stable per-host label to filter on — tracked as a follow-up, not
+# built here (this PR's scope is the single-box merge→run gap).
 
 # kind : github-runner-label : launchd-label  (container label is always arena-runner=<kind>)
 RUNNERS=(
@@ -44,16 +52,14 @@ command -v gh >/dev/null    || { log "gh not on PATH — exiting"; exit 1; }
 command -v docker >/dev/null|| { log "docker not on PATH — exiting"; exit 1; }
 
 # Portable command bounding. GNU `timeout` is NOT on stock macOS — it ships as `gtimeout` via
-# coreutils, and may be absent entirely (Carnot/Tesla HIGH: a bare `timeout` → "command not found" →
-# every tick soft-fails → the daemon silently never runs). Resolve whichever exists; if NEITHER, run
-# UNBOUNDED rather than disable the daemon — an unbounded network call is a lesser evil than a dead
-# merge→run integrity engine (the hung-TLS case is rare; a missing `timeout` on macOS is the norm).
+# coreutils. A bounded network call is REQUIRED, not optional: launchd will not overlap ticks for the
+# same label, so an UNBOUNDED hung `git fetch`/`gh api` freezes merge→run integrity indefinitely — a
+# dead engine that merely LOOKS alive (Kelvin: "a fuse designed not to blow"). So we REQUIRE a timeout
+# command and fail-CLOSED-LOUD if absent (every tick logs + exits non-zero, visible in the log) rather
+# than run unbounded-and-frozen. `brew install coreutils` provides `gtimeout`.
 TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
-[ -n "$TIMEOUT_CMD" ] || log "note: no timeout/gtimeout on PATH — network calls run UNBOUNDED (brew install coreutils for gtimeout)"
-bounded() {   # bounded <seconds> <cmd...> — applies the timeout only if one is available
-  local secs="$1"; shift
-  if [ -n "$TIMEOUT_CMD" ]; then "$TIMEOUT_CMD" "$secs" "$@"; else "$@"; fi
-}
+[ -n "$TIMEOUT_CMD" ] || { log "FATAL: no timeout/gtimeout on PATH — refusing to run network calls unbounded (they would freeze the daemon under launchd's no-overlap). Install: brew install coreutils"; exit 1; }
+bounded() { "$TIMEOUT_CMD" "$@"; }   # bounded <seconds> <cmd...>
 
 # The deploy worktree must exist and be a LINKED worktree before we touch it (a linked worktree's .git
 # is a FILE, not a dir — matches install-launchd.sh's identity rigor rather than accepting any git
@@ -80,6 +86,12 @@ if [ "$LOCAL" = "$REMOTE" ]; then
 fi
 
 # --- 2. Fast-forward the deploy worktree (ff-only; fail-CLOSED on divergence) -----------------------
+# NOTE (why fast-forwarding the tree that contains THIS running script is safe): `git merge --ff-only`
+# writes each changed file to a NEW inode and renames it into place (verified: inode changes across an
+# ff). A running bash holds the OLD inode's fd and keeps reading the original bytes to completion, so
+# this process finishes on pre-merge code and the NEXT StartInterval tick runs the merged script. Do
+# NOT "fix" this into a two-stage launcher on a self-modification worry — the atomic-rename guarantee
+# already covers it (a Carnot cage-match finding, verified and rejected).
 # --is-ancestor guards against a diverged deploy tree (should be impossible — nobody commits there —
 # but if it happens, a non-ff merge would rewrite/conflict; refuse and surface it instead).
 if ! git -C "$DEPLOY_ROOT" merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
@@ -120,6 +132,10 @@ deregister_idle() {   # $@ = runner ids
   for rid in "$@"; do bounded 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
 }
 
+# True (exit 0) if any row in a roster text ("<id> <busy>" lines) is busy. Named for legibility so the
+# set-e-safe re-check reads plainly rather than as an inline pipe (Kelvin).
+rows_have_busy() { printf '%s\n' "$1" | grep -q ' true$'; }
+
 for spec in "${RUNNERS[@]}"; do
   IFS=: read -r kind ghlabel label <<<"$spec"
 
@@ -148,8 +164,11 @@ for spec in "${RUNNERS[@]}"; do
   # registration is schedulable on old code and IS the failure this daemon prevents, so de-register it
   # regardless of the busy sibling (Carnot HIGH — a label-wide busy veto left idle orphans online). We
   # deliberately do NOT touch containers here: we cannot cheaply tell the busy runner's container from
-  # an orphan's by label alone, and a de-registered idle runner is already unschedulable, so its
-  # container is inert until the next no-busy tick reaps it.
+  # an orphan's by label alone. Honest residual (Tesla): a de-registered idle runner's CONTAINER is now
+  # INERT (unschedulable — it can never pick up a job), but it is not reaped here and there is no reap
+  # on a no-drift tick, so an inert container can linger until the next drift-relaunch of this kind or a
+  # reinstall. That is a bounded resource leak, never a stale-code-execution path (the security-critical
+  # invariant — no runner runs jobs on old code — holds the instant we de-register).
   if [ "$busy_any" = "1" ]; then
     if [ -z "${idle_ids// /}" ]; then
       log "$kind: a runner is BUSY, no idle registrations — self-heals on job completion"
@@ -178,7 +197,7 @@ for spec in "${RUNNERS[@]}"; do
   # the residual worst case is one interrupted job on a merge tick, surfaced by GitHub as a re-runnable
   # failed run — never silent corruption. A FAILED re-check is also fail-closed (skip).
   # Same set-e-safe form as above — a bare `recheck=$(...)` on failure would abort the script, not skip.
-  if ! recheck="$(runner_state "$ghlabel")" || printf '%s\n' "$recheck" | grep -q ' true$'; then
+  if ! recheck="$(runner_state "$ghlabel")" || rows_have_busy "$recheck"; then
     log "$kind: became BUSY or re-check failed just before relaunch — skipping this tick (will heal on its job boundary)"
     continue
   fi
