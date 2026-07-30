@@ -201,10 +201,25 @@ test("validatePatch: oversized patch → REJECTED", () => {
   assert.equal(v.ok, false);
   assert.match(v.reasons.join(" "), /bytes/);
 });
-test("parsePatch: quoted path with NUL is decoded and then caught by pathAllowed", () => {
-  // The C-unquote reveals the control byte; the path then fails pathAllowed (NUL).
-  const { paths } = parsePatch('diff --git "a/docs/x" "b/docs/x"\n');
-  assert.ok(paths.has("docs/x"));
+test("validatePatch: a quoted path with an actual NUL (\\000) is decoded and REJECTED", () => {
+  // git C-quotes a NUL as \000; unquote reveals it, pathAllowed then rejects (contains \0).
+  const v = validatePatch('diff --git "a/docs/x\\000y" "b/docs/x\\000y"\nindex 1..2 100644\n');
+  assert.equal(v.ok, false);
+  assert.ok(v.rejected.some((p) => p.includes("\0")), `rejected=${JSON.stringify(v.rejected)}`);
+});
+test("validatePatch: a non-100644 mode on the INDEX line (unchanged-mode exec file) is REFUSED", () => {
+  // Content edit of an already-exec file emits `index …..… 100755` with NO new/old mode line.
+  const v = validatePatch(
+    "diff --git a/docs/x b/docs/x\nindex 1111111..2222222 100755\n--- a/docs/x\n+++ b/docs/x\n@@ -1 +1 @@\n-a\n+b\n"
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.reasons.join(" "), /100755|only 100644/);
+});
+test("validatePatch: a normal docs edit (index …100644) is still ACCEPTED", () => {
+  const v = validatePatch(
+    "diff --git a/docs/x b/docs/x\nindex 1111111..2222222 100644\n--- a/docs/x\n+++ b/docs/x\n@@ -1 +1 @@\n-a\n+b\n"
+  );
+  assert.equal(v.ok, true, v.reasons.join("; "));
 });
 test("validatePatch: a docs patch that SHOWS a diff example is NOT falsely rejected", () => {
   // The added content includes a line that renders as `+++ b/arena/x` (a diff example inside a doc).

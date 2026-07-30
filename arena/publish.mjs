@@ -110,6 +110,12 @@ export function parsePatch(text) {
     // and are harmless, so they are not restricted.
     const mSet = /^(new file mode|new mode) ([0-7]{6})$/.exec(line);
     if (mSet && mSet[2] !== "100644") flags.badMode = mSet[2];
+    // git ALSO carries the file mode on the `index` line for a content-modified file whose mode is
+    // UNCHANGED (`index <old>..<new> <mode>`). new file / mode-change cases emit no trailing mode here,
+    // so this is the remaining mode surface — admit it too, same allowlist (cage-match r2 — Tesla:
+    // "incomplete admission of what git actually emits"). A normal docs edit is `…100644` → not flagged.
+    const mIdx = /^index [0-9a-f]+\.\.[0-9a-f]+ ([0-7]{6})$/.exec(line);
+    if (mIdx && mIdx[1] !== "100644") flags.badMode = mIdx[1];
     if (/^Subproject commit [0-9a-f]{7,40}$/.test(line)) flags.submodule = true;
     // Binary content — either form git emits.
     if (line.startsWith("GIT binary patch")) flags.binary = true;
