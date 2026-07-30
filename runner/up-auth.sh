@@ -24,9 +24,15 @@ IMAGE="arena-auth"
 RESTART_POLICY="${AUTH_RESTART_POLICY:-unless-stopped}"
 
 # Real token from the host env (NOT a GitHub Actions secret, NOT the plist). Fail closed if absent.
-# shellcheck disable=SC1090
-[ -f "$HOME/.claude/.env" ] && source "$HOME/.claude/.env"
-REAL_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+# Parse ONLY the one var we need instead of `source`-ing the whole ~/.claude/.env (Carnot's catch:
+# sourcing wholesale imports unrelated shell content into the launcher context).
+REAL_OAUTH_TOKEN=""
+if [ -f "$HOME/.claude/.env" ]; then
+  _line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$HOME/.claude/.env" | tail -1)"
+  REAL_OAUTH_TOKEN="${_line#*=}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN%\"}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN#\"}"
+  REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN%\'}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN#\'}"
+fi
+REAL_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-$REAL_OAUTH_TOKEN}"
 [ -n "$REAL_OAUTH_TOKEN" ] || { echo "[arena-auth] CLAUDE_CODE_OAUTH_TOKEN not found in ~/.claude/.env — refusing to start a token-less proxy." >&2; exit 1; }
 
 # ADMIN_TOKEN: host-only file, 0600, minted once. Never in git, never in the image.

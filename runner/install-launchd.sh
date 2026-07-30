@@ -94,6 +94,12 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # proxy with stale bind-mount paths. Install is the explicit "something changed" signal, so drop the
   # proxy here; the egress agent recreates it from THIS checkout when it bootstraps below.
   docker rm -f egress >/dev/null 2>&1 || true
+  # Same reasoning for arena-auth (the spend trust boundary): up-auth.sh REUSES a healthy container
+  # at runtime, so a security fix to server.mjs would stay dark under KeepAlive's "already healthy"
+  # unless install force-drops it. Install is the explicit "something changed" signal (Tesla's PR #17
+  # catch: stale trust-boundary container survives rebuild); the arena-auth agent recreates it from
+  # THIS checkout when it bootstraps.
+  docker rm -f arena-auth >/dev/null 2>&1 || true
 fi
 
 # --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
