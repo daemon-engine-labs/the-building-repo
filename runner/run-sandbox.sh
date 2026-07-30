@@ -83,6 +83,19 @@ revoke_nonce() {
   docker exec arena-auth node server.mjs revoke "$1" >/dev/null 2>&1 || true
 }
 
+# Signal-safe nonce cleanup. Revoke on EVERY exit path — normal return, a `set -e` abort,
+# OR a launchd/SIGTERM kill mid-`docker run` (cage-match: revoke was straight-line-only, so
+# a kill leaked a live spend nonce until the proxy's next restart; a revoked nonce also
+# neuters any orphaned --rm container that outlives us, since the proxy rejects it). NONCE is
+# script-GLOBAL so the trap can still see it after run_job's local frame is gone. The EXIT
+# trap covers normal + set-e exits; INT/TERM revoke then exit (which re-fires EXIT as a no-op,
+# NONCE already cleared).
+NONCE=""
+cleanup_nonce() { [ -n "${NONCE:-}" ] && revoke_nonce "$NONCE"; NONCE=""; }
+on_signal() { cleanup_nonce; exit 143; }
+trap cleanup_nonce EXIT
+trap on_signal INT TERM
+
 # Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
@@ -104,18 +117,20 @@ run_job() {
   # Mint the per-job spend nonce. Only inject the model-access env when a nonce actually exists — an
   # empty ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN could read as a mis-set base URL to the CLI, so we
   # add those -e flags conditionally rather than passing empty strings.
-  local nonce auth_env=()
-  nonce="$(mint_nonce)"
-  if [ -n "$nonce" ]; then
+  local auth_env=()
+  NONCE="$(mint_nonce)"   # script-global so the EXIT/TERM trap can revoke it on a kill mid-job
+  if [ -n "$NONCE" ]; then
     echo "[sandbox] minted a per-job spend nonce (arena-auth data plane at http://arena-auth:8080)" >&2
-    auth_env=( -e ANTHROPIC_BASE_URL="http://arena-auth:8080" -e ANTHROPIC_AUTH_TOKEN="$nonce" )
+    auth_env=( -e ANTHROPIC_BASE_URL="http://arena-auth:8080" -e ANTHROPIC_AUTH_TOKEN="$NONCE" )
   else
     echo "[sandbox] WARNING: arena-auth mint failed/absent — launching token-less; propose builds will have NO model access (never a real-token fallback)" >&2
   fi
 
-  # NO_PROXY must include arena-auth: the sandbox forces all egress through tinyproxy, whose allowlist
-  # only knows EXTERNAL hosts. arena-auth is an internal docker name on arena-internal, so the one hop
-  # the whole credential-off-sandbox design depends on has to bypass the proxy. Harmless when unused.
+  # NO_PROXY/no_proxy must include arena-auth: the sandbox forces all egress through tinyproxy, whose
+  # allowlist only knows EXTERNAL hosts. arena-auth is an internal docker name on arena-internal, so the
+  # one hop the whole credential-off-sandbox design depends on has to bypass the proxy. BOTH cases are
+  # set because the client matrix is mixed — curl/Python honor lowercase `no_proxy` only, some Node
+  # stacks uppercase only (cage-match: uppercase-only was a half-wired bypass). Harmless when unused.
   local rc=0
   docker run --rm \
     --name "arena-sandbox-$$" \
@@ -124,6 +139,7 @@ run_job() {
     -e HTTP_PROXY="$PROXY"  -e HTTPS_PROXY="$PROXY" \
     -e http_proxy="$PROXY"  -e https_proxy="$PROXY" \
     -e NO_PROXY="localhost,127.0.0.1,arena-auth" \
+    -e no_proxy="localhost,127.0.0.1,arena-auth" \
     -e ARENA_REPO="$REPO" \
     -e RUNNER_TOKEN="$token" \
     ${auth_env[@]+"${auth_env[@]}"} \
@@ -133,9 +149,9 @@ run_job() {
         --name "sandbox-$(hostname)-$$" && ./run.sh
     ' || rc=$?
 
-  # Revoke the nonce the instant the ephemeral job ends — bounds the in-memory registry to concurrent
-  # jobs and kills a leaked nonce with its job. Best-effort; never changes the job's exit status.
-  revoke_nonce "$nonce"
+  # Revoke the nonce the instant the ephemeral job ends (the EXIT/TERM trap is the backstop for a kill
+  # mid-job). cleanup_nonce revokes + clears NONCE, so the trap is then a no-op. Never changes rc.
+  cleanup_nonce
   return "$rc"
 }
 

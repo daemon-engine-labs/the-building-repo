@@ -49,17 +49,29 @@ jobs:
     runs-on: [self-hosted, sandbox]
     # T2: strip the workflow-default `issues: write`. This job must not carry any repo-write capability
     # on the same write→file→artifact channel the credential-off-sandbox design just closed for OAuth.
+    # DELIBERATELY NOT `actions: write`: upload-artifact@v4 authenticates via the runner-injected
+    # ACTIONS_RUNTIME_TOKEN, which `permissions:` does not govern — so contents:read suffices for the
+    # upload. Adding actions:write would hand this hostile-input job the power to cancel/re-run/delete
+    # workflow runs (cage-match: rejected Tesla's actions:write HIGH on the security asymmetry — if the
+    # upload ever needs a scope, Step-4 live-fire surfaces it loudly at zero security cost).
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Do NOT persist GITHUB_TOKEN into .git/config as an http.extraheader — even the
+          # contents:read token is a real credential, and leaving it in the working tree hands
+          # the hostile-issue agent a token it could write into the diff→artifact (cage-match T-D).
+          persist-credentials: false
       - name: prove isolation (no secrets reachable)
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
           # On the sandbox runner this object must contain only GITHUB_TOKEN (or be empty).
           # If a real provider secret ever appears here, the isolation is broken — fail loud.
-          echo "secrets visible to this job: $SECRETS_JSON"
+          # Print only the KEY NAMES, never the values: a trust-boundary proof must not echo a
+          # secret object into the run log and lean on masking (cage-match — Carnot).
+          echo "secret keys visible to this job: $(node -e 'try{process.stdout.write(Object.keys(JSON.parse(process.env.SECRETS_JSON||"{}")).join(",")||"<none>")}catch(e){process.stdout.write("<unparseable>")}')"
           if echo "$SECRETS_JSON" | grep -qiE 'OAUTH|ANTHROPIC|OPENAI|GEMINI|CARD|BUDGET'; then
             echo "::error::privileged secret leaked into the sandbox path"
             exit 1
@@ -82,9 +94,11 @@ jobs:
             echo "::error::no arena-auth nonce injected — build-sandbox cannot reach a model. Is arena-auth up on the runner host?"
             exit 1
           fi
-          # Defense in depth: the base URL must be the internal proxy, never a real Anthropic endpoint.
+          # Defense in depth: the base URL must be EXACTLY the internal proxy origin, never a real
+          # Anthropic endpoint. Exact match (not a prefix glob) so a value like
+          # http://arena-auth:8080.evil.example can't satisfy it (cage-match — Tesla).
           case "$ANTHROPIC_BASE_URL" in
-            http://arena-auth:8080*) : ;;
+            http://arena-auth:8080|http://arena-auth:8080/) : ;;
             *) echo "::error::ANTHROPIC_BASE_URL is not the arena-auth proxy: $ANTHROPIC_BASE_URL"; exit 1 ;;
           esac
           echo "credential-off-sandbox verified; model access via arena-auth proxy."
@@ -108,7 +122,9 @@ jobs:
           # Stage everything (incl. new files) and diff the index against the pre-run base → the full
           # proposal as a single text patch, whether the agent left it staged, unstaged, or committed.
           git add -A
-          git diff --cached "$BASE_SHA" > "$RUNNER_TEMP/proposed.patch" || true
+          # No `|| true` needed: this step runs without `set -e`, and `git diff` (no --exit-code)
+          # returns 0 even when there ARE changes, so it never aborts the step (cage-match — Kelvin).
+          git diff --cached "$BASE_SHA" > "$RUNNER_TEMP/proposed.patch"
           if [ ! -s "$RUNNER_TEMP/proposed.patch" ]; then
             echo "::warning::propose produced no diff for #${ISSUE_NUMBER} — nothing to publish"
           else
