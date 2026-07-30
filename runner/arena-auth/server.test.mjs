@@ -13,7 +13,7 @@ process.env.MAX_BODY_BYTES = "1024";
 process.env.CEIL_MAX_REQUESTS = "200";
 
 const mod = await import("./server.mjs");
-const { nonces, mintNonce, checkNonce, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled, RESERVE_TOKENS } = mod._internal;
+const { nonces, mintNonce, checkNonce, pruneNonces, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled, RESERVE_TOKENS } = mod._internal;
 
 let dataPort, adminPort;
 before(async () => {
@@ -76,6 +76,13 @@ test("mint: prunes already-expired entries so the registry can't grow unbounded"
   nonces.get(dead).expiresAt = Date.now() - 1;   // expired, never revoked (host died mid-job)
   assert.equal(nonces.has(dead), true);
   mintNonce();                                    // any subsequent mint sweeps the dead entry
+  assert.equal(nonces.has(dead), false);
+});
+test("pruneNonces: self-stabilizing without a mint (periodic sweep path)", () => {
+  const dead = mintNonce();
+  nonces.get(dead).expiresAt = Date.now() - 1;   // expired; no further mint will happen (heartbeat idle)
+  assert.equal(nonces.has(dead), true);
+  pruneNonces();                                  // the setInterval timer calls exactly this
   assert.equal(nonces.has(dead), false);
 });
 test("checkNonce: request budget exhaustion denied", () => {

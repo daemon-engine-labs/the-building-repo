@@ -78,7 +78,12 @@ mint_nonce() {
   # Extract the FIRST "nonce":"…" field, dependency-free (no jq/node-on-host-PATH assumption). grep -o
   # + head -1 grabs only the first match, so stray log lines or multiple JSON objects can't make us
   # capture the wrong value the way a greedy whole-line sed could (cage-match round 2 — Carnot/Tesla).
-  printf '%s' "$out" | grep -oE '"nonce":"[^"]*"' | head -1 | sed 's/"nonce":"\([^"]*\)"/\1/'
+  # Trailing `|| true` is LOAD-BEARING: grep exits 1 on no-match (empty mint = arena-auth down) and
+  # head can SIGPIPE non-zero even on success, both of which — under the script's `set -euo pipefail` —
+  # would make `NONCE="$(mint_nonce)"` abort run_job and WEDGE the runner (incl. gate), breaking the
+  # fail-OPEN-on-availability property. `|| true` forces a 0 exit so an empty nonce falls through to the
+  # token-less launch branch as designed (cage-match round 4 — Tesla: a round-3 regression).
+  printf '%s' "$out" | grep -oE '"nonce":"[^"]*"' | head -1 | sed 's/"nonce":"\([^"]*\)"/\1/' || true
 }
 revoke_nonce() {
   [ -n "${1:-}" ] || return 0
@@ -115,9 +120,11 @@ run_job() {
   # Host-side --name/--label so cleanup can target THIS runner's containers by service identity
   # rather than by image ancestry (which also matches the privileged runner and manual test
   # containers). $$ = this oneshot's pid → unique per launch.
-  # Token is passed as a docker -e env var and expanded INSIDE the container (single-quoted inner
-  # script), never interpolated into the host's bash -c string — so a token with shell
-  # metacharacters can't break or inject into the command.
+  # The registration token is piped to the container over STDIN and read into a NON-EXPORTED shell var
+  # (never `-e RUNNER_TOKEN`): a `-e` value lands in PID 1's /proc/1/environ, readable by the untrusted
+  # agent (same UID) even after `unset` — a self-hosted runner REGISTRATION credential that could attach
+  # rogue runners. Via stdin it is never in the environment or in the host bash -c string; config.sh
+  # consumes it and exits before ./run.sh (and the job) starts (cage-match round 4 — Carnot HIGH).
   # Remove any stale same-name container (a killed prior script that didn't --rm, then PID reuse) so
   # --name can't collide and wedge us into backoff before the runner can even deregister.
   docker rm -f "arena-sandbox-$$" >/dev/null 2>&1 || true
@@ -140,7 +147,9 @@ run_job() {
   # set because the client matrix is mixed — curl/Python honor lowercase `no_proxy` only, some Node
   # stacks uppercase only (cage-match: uppercase-only was a half-wired bypass). Harmless when unused.
   local rc=0
-  docker run --rm \
+  # `-i` keeps stdin open; the token is delivered as ONE newline-terminated line (so `read` returns 0
+  # under set -e) and read into a non-exported var inside the container. No -e RUNNER_TOKEN.
+  printf '%s\n' "$token" | docker run --rm -i \
     --name "arena-sandbox-$$" \
     --label arena-runner=sandbox \
     --network arena-internal \
@@ -149,12 +158,14 @@ run_job() {
     -e NO_PROXY="localhost,127.0.0.1,arena-auth" \
     -e no_proxy="localhost,127.0.0.1,arena-auth" \
     -e ARENA_REPO="$REPO" \
-    -e RUNNER_TOKEN="$token" \
     ${auth_env[@]+"${auth_env[@]}"} \
     "$IMAGE" bash -c '
+      IFS= read -r RUNNER_TOKEN   # from stdin, NOT the environment — never reaches /proc/1/environ
       ./config.sh --url "https://github.com/$ARENA_REPO" --token "$RUNNER_TOKEN" \
         --labels self-hosted,sandbox --ephemeral --unattended --replace \
-        --name "sandbox-$(hostname)-$$" && ./run.sh
+        --name "sandbox-$(hostname)-$$" \
+        && unset RUNNER_TOKEN \
+        && ./run.sh
     ' || rc=$?
 
   # Revoke the nonce the instant the ephemeral job ends (the EXIT/TERM trap is the backstop for a kill

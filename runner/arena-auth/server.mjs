@@ -118,12 +118,20 @@ function clamp(n, def, ceil) {
   const v = Number.isFinite(n) ? Math.floor(n) : def;
   return Math.max(1, Math.min(v, ceil));
 }
-function mintNonce({ maxRequests, maxTokens } = {}) {
-  // Opportunistic prune: evict already-expired entries so the in-memory registry can't grow unbounded
-  // under mint-churn (heartbeat mints one nonce per ephemeral runner). Bounds the map to ~one TTL of
-  // live nonces (cage-match r3 — Carnot/Tesla: expired entries were denied but never removed).
+// Evict revoked/expired entries so the in-memory registry can't grow unbounded. Called on every mint
+// AND on a periodic timer (start()) so the registry is SELF-STABILIZING even when minting pauses — it
+// must not depend on future work arriving to clean up old work (cage-match r3/r4 — Carnot/Kelvin).
+function pruneNonces() {
   const now = Date.now();
   for (const [k, e] of nonces) { if (e.revoked || now > e.expiresAt) nonces.delete(k); }
+}
+const SWEEP_MS = (() => {
+  const v = parseInt(process.env.NONCE_SWEEP_MS || "300000", 10); // 5 min default
+  return Number.isFinite(v) && v > 0 ? v : 300000;
+})();
+
+function mintNonce({ maxRequests, maxTokens } = {}) {
+  pruneNonces();
   const nonce = randomBytes(24).toString("base64url");
   nonces.set(nonce, {
     requests: 0,
@@ -346,6 +354,9 @@ export function start() {
   }
   dataServer.listen(DATA_PORT, DATA_BIND, () => console.error(`[arena-auth] data plane on ${DATA_BIND}:${DATA_PORT} → ${UPSTREAM_HOST} (allowlisted routes only)`));
   adminServer.listen(ADMIN_PORT, ADMIN_BIND, () => console.error(`[arena-auth] admin plane on ${ADMIN_BIND}:${ADMIN_PORT} (ADMIN_TOKEN-gated, loopback-only by default)`));
+  // Periodic GC so the registry self-stabilizes even if minting pauses (heartbeat idle). unref() so the
+  // timer never keeps the process alive on its own.
+  setInterval(pruneNonces, SWEEP_MS).unref();
 }
 
 // ── local admin CLI (scriptable minting via `docker exec arena-auth node server.mjs mint`) ────────
@@ -362,7 +373,7 @@ function adminCall(route, payload) {
   });
 }
 
-export const _internal = { nonces, mintNonce, checkNonce, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS, ADMIN_TOKEN };
+export const _internal = { nonces, mintNonce, checkNonce, pruneNonces, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS, ADMIN_TOKEN };
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cmd = process.argv[2];
