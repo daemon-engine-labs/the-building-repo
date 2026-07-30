@@ -65,8 +65,14 @@ const RESERVE_TOKENS = parseInt(process.env.RESERVE_TOKENS || "16000", 10);
 // best-effort courtesy — a host killed mid-job (SIGTERM) or a wedged `docker exec revoke` can leave a
 // spendable nonce alive. The TTL is the LAW that bounds that leak regardless of whether revoke ran
 // (cage-match round 2 — Tesla: "revoke is a courtesy; expiry is law"). One hour covers any single
-// build with margin; a leaked nonce dies on its own well before it could matter.
-const NONCE_TTL_MS = parseInt(process.env.NONCE_TTL_MS || "3600000", 10);
+// build with margin; a leaked nonce dies on its own well before it could matter. VALIDATED: a
+// non-numeric/negative env would make parseInt NaN → `Date.now() > NaN` is always false → the backstop
+// silently vanishes. Fall back to the 1h default on any non-positive/non-finite value (cage-match r3 —
+// Carnot: a fail-closed control that a typo can disable is not fail-closed).
+const NONCE_TTL_MS = (() => {
+  const v = parseInt(process.env.NONCE_TTL_MS || "3600000", 10);
+  return Number.isFinite(v) && v > 0 ? v : 3600000;
+})();
 // Hard limits so a hostile sandbox can't OOM/hang the concentrator.
 const MAX_BODY_BYTES = parseInt(process.env.MAX_BODY_BYTES || "1048576", 10); // 1 MiB
 const UPSTREAM_TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || "120000", 10);
@@ -113,6 +119,11 @@ function clamp(n, def, ceil) {
   return Math.max(1, Math.min(v, ceil));
 }
 function mintNonce({ maxRequests, maxTokens } = {}) {
+  // Opportunistic prune: evict already-expired entries so the in-memory registry can't grow unbounded
+  // under mint-churn (heartbeat mints one nonce per ephemeral runner). Bounds the map to ~one TTL of
+  // live nonces (cage-match r3 — Carnot/Tesla: expired entries were denied but never removed).
+  const now = Date.now();
+  for (const [k, e] of nonces) { if (e.revoked || now > e.expiresAt) nonces.delete(k); }
   const nonce = randomBytes(24).toString("base64url");
   nonces.set(nonce, {
     requests: 0,
@@ -302,7 +313,7 @@ const adminServer = http.createServer((req, res) => {
       const nonce = mintNonce(payload);
       const e = nonces.get(nonce);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ nonce, maxRequests: e.maxRequests, maxTokens: e.maxTokens }));
+      res.end(JSON.stringify({ nonce, maxRequests: e.maxRequests, maxTokens: e.maxTokens, expiresAt: e.expiresAt }));
       return;
     }
     if (req.method === "POST" && req.url === "/admin/revoke") {

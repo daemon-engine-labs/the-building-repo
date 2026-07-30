@@ -71,6 +71,13 @@ test("checkNonce: expired denied (server TTL is the fail-closed backstop to clie
   assert.equal(v.ok, false);
   assert.match(v.reason, /expired/);
 });
+test("mint: prunes already-expired entries so the registry can't grow unbounded", () => {
+  const dead = mintNonce();
+  nonces.get(dead).expiresAt = Date.now() - 1;   // expired, never revoked (host died mid-job)
+  assert.equal(nonces.has(dead), true);
+  mintNonce();                                    // any subsequent mint sweeps the dead entry
+  assert.equal(nonces.has(dead), false);
+});
 test("checkNonce: request budget exhaustion denied", () => {
   const n = mintNonce({ maxRequests: 2, maxTokens: 1000000 }); nonces.get(n).requests = 2;
   assert.match(checkNonce(n).reason, /request budget/);

@@ -211,6 +211,24 @@ Ran `claude -p` in an isolated empty `HOME`, `CLAUDE_CODE_OAUTH_TOKEN` unset, du
   infra and cleared to build; Step 4 live end-to-end verify waits on quota.
 - Decision: OAuth-subscription inject works — no API-key path needed.
 
+## STEP 2 SHIPPED — named residuals (cage-match PR #18, 3 rounds)
+
+Step 2 (host-side nonce mint + `build-sandbox` job wiring + server-side TTL) shipped after a 4-family
+cage-match (Wu quota-dead). Two residuals are ACCEPTED and NAMED, not silently absorbed:
+
+- **Nonce-in-artifact.** The propose agent holds its nonce as `ANTHROPIC_AUTH_TOKEN` in env (by design),
+  so a prompt-injected agent can write the nonce value into `proposed.patch` → the artifact. This is a
+  manifestation of T1's already-accepted bounded residual: a leaked nonce is NOT a leaked token — it is
+  budget-capped (≤ one job's requests/tokens), TTL-bounded (`NONCE_TTL_MS`, default 1h), and revoked at
+  job end. Max exposure = `min(budget, TTL)`, and the window to use it closes at host revoke shortly after
+  upload. **Lift condition:** Step 3's publisher MUST treat the patch as hostile (default-deny path
+  allowlist) and never re-inject or log nonce-shaped strings. Tightening tracked as a data-plane
+  self-revoke endpoint the job calls before capture (task) — would close the window fully.
+- **Trapless death (SIGKILL/OOM/power-loss).** `run-sandbox.sh` revokes on EXIT/INT/TERM, but a SIGKILL
+  skips the trap; the nonce then lives until the server TTL. Bounded by `min(budget, NONCE_TTL_MS)` — ops
+  must keep the TTL ≤ the acceptable leak window. This is the fail-closed backstop working as intended:
+  revoke is courtesy, expiry is law.
+
 ## Open variables (no silent TODOs)
 
 - Where does the real OAuth token for `arena-auth` live — runner box env, a Worker secret, a file

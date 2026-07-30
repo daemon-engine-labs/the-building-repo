@@ -97,9 +97,12 @@ NONCE=""
 # `set -e`, a cleanup that returned non-zero could suppress on_signal's `exit 143` (cage-match round 2 —
 # Carnot/Tesla). `if…fi; return 0` makes that independent of any future edit to revoke_nonce.
 cleanup_nonce() { if [ -n "${NONCE:-}" ]; then revoke_nonce "$NONCE" || true; NONCE=""; fi; return 0; }
-on_signal() { cleanup_nonce; exit 143; }
+# Convention-correct exit codes so a supervisor/log can tell a user interrupt (130) from a supervisor
+# termination (143): 128 + signal number (cage-match r3 — Carnot). cleanup_nonce runs first either way.
+on_signal() { cleanup_nonce; exit "${1:-143}"; }
 trap cleanup_nonce EXIT
-trap on_signal INT TERM
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 # Register + run exactly one ephemeral job. Returns the container's exit status. Called only after
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
