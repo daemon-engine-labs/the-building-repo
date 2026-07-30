@@ -24,7 +24,9 @@ LA_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
 PLISTBUDDY=/usr/libexec/PlistBuddy
 # Egress FIRST so its wall is up before the runners bootstrap; runners self-heal if it isn't yet.
-AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
+# Egress FIRST (raises the wall), then arena-auth (the spend trust boundary — reuses the wall's
+# networks; up-auth.sh creates them if egress hasn't yet), then the two runners.
+AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-auth com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
 
 # PlistBuddy takes the remainder of its -c line as the value, which safely handles spaces and regex
 # metacharacters (#, &, backslash) — but a newline or a double-quote in a path would break the command
@@ -69,7 +71,7 @@ rm -f "$HOME/.arena-sandbox.fails" "$HOME/.arena-privileged.fails" 2>/dev/null |
 # Only bash-INVOKED script processes, so an editor/pager/grep holding one of these paths open is not
 # a target. The launchd-managed processes are already gone (step 1), so anything left is a real
 # pre-launchd straggler.
-for s in run-egress.sh run-privileged.sh run-sandbox.sh; do
+for s in run-egress.sh run-auth.sh run-privileged.sh run-sandbox.sh; do
   pkill -f "bash.*runner/$s" 2>/dev/null || true
 done
 
