@@ -49,6 +49,12 @@ test("routeAllowed: POST /v1/messages allowed; GET not; unknown path not", () =>
   assert.equal(routeAllowed("POST", "/v1/organizations"), false); // account-enumeration path
   assert.equal(routeAllowed("DELETE", "/v1/messages"), false);
 });
+test("routeAllowed: prefix is boundary-anchored — /v1/messagesX must NOT slip", () => {
+  assert.equal(routeAllowed("POST", "/v1/messages-evil"), false);
+  assert.equal(routeAllowed("POST", "/v1/messagesX"), false);
+  assert.equal(routeAllowed("GET", "/v1/models-secret"), false);
+  assert.equal(routeAllowed("POST", "/v1/messages?beta=1"), true); // query is fine
+});
 test("data plane: disallowed route → 403 (before nonce check)", async () => {
   const r = await req(dataPort, { method: "POST", path: "/v1/organizations", headers: { authorization: "Bearer whatever" } });
   assert.equal(r.status, 403);
@@ -129,6 +135,24 @@ test("kill switch: engaged → valid nonce denied", async () => {
   const n = mintNonce(); setKilled(true);
   assert.equal((await req(dataPort, { headers: { authorization: `Bearer ${n}` } })).status, 401);
   setKilled(false);
+});
+test("admin: malformed JSON → 400", async () => {
+  const r = await req(adminPort, { path: "/admin/nonce", headers: { authorization: "Bearer admin-secret", "content-type": "application/json" }, body: "{not json" });
+  assert.equal(r.status, 400);
+});
+test("admin: oversized body → 413", async () => {
+  const r = await req(adminPort, { path: "/admin/nonce", headers: { authorization: "Bearer admin-secret" }, body: "x".repeat(2048) });
+  assert.equal(r.status, 413);
+});
+test("scanUsage: a data line reassembled from two halves meters correctly", () => {
+  // Simulates the handler's lineBuf: the record only scans once COMPLETE.
+  const acc = { input: 0, output: 0 };
+  let lineBuf = 'event: message_delta\ndata: {"usage":{"output_';
+  scanUsage(lineBuf.slice(0, lineBuf.lastIndexOf("\n")), acc); // only the complete first line
+  assert.equal(acc.output, 0); // partial data: line not yet parsed
+  lineBuf = lineBuf.slice(lineBuf.lastIndexOf("\n") + 1) + 'tokens":88}}\n';
+  scanUsage(lineBuf, acc);
+  assert.equal(acc.output, 88); // reassembled → metered
 });
 test("safeEqual: correct + length-mismatch safe", () => {
   assert.equal(safeEqual("abc", "abc"), true);

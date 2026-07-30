@@ -73,7 +73,10 @@ const ALLOWED_ROUTES = [
 ];
 function routeAllowed(method, url) {
   const path = (url || "").split("?")[0];
-  return ALLOWED_ROUTES.some((r) => r.method === method && path.startsWith(r.prefix));
+  // Boundary-anchored: the prefix must be the whole path or a subpath (next char is "/") — NOT a
+  // bare startsWith, which would admit /v1/messagesX (cage-match R1: the allowlist must be true
+  // regardless of upstream's route table).
+  return ALLOWED_ROUTES.some((r) => r.method === method && (path === r.prefix || path.startsWith(r.prefix + "/")));
 }
 
 // Outbound REQUEST headers are rebuilt from this allowlist (Tesla/Carnot: rebuild, don't scrub). The
@@ -81,12 +84,23 @@ function routeAllowed(method, url) {
 const REQ_HEADER_ALLOW = new Set(["content-type", "accept", "anthropic-version", "anthropic-beta"]);
 // Response headers passed back to the sandbox — everything else (set-cookie, hop-by-hop, upstream
 // internals) is dropped.
-const RES_HEADER_ALLOW = new Set(["content-type", "anthropic-version", "request-id", "anthropic-ratelimit-requests-remaining"]);
+// request-id intentionally NOT forwarded (cage-match: it's an upstream account-correlatable handle
+// that could land in an artifact). content-type is all the CLI needs.
+const RES_HEADER_ALLOW = new Set(["content-type", "anthropic-version"]);
 
 // ── nonce registry (in-memory; a proxy restart revokes every live nonce — fail-closed) ──────────
 // nonce -> { requests, maxRequests, tokens, reserved, maxTokens, revoked }
 const nonces = new Map();
 let killed = false; // global kill switch
+// In-flight upstream requests so the kill switch / revoke can actually ABORT, not just gate future
+// admissions (cage-match: "a kill switch that only stops new work is a future-admission gate, not a
+// kill"). Map of upstream req → nonce, so revoke can target one nonce and kill can drop all.
+const inFlight = new Map();
+function abortInFlight(pred) {
+  for (const [up, nonce] of inFlight) {
+    if (pred(nonce)) { try { up.destroy(new Error("aborted by admin")); } catch { /* already gone */ } }
+  }
+}
 
 function clamp(n, def, ceil) {
   const v = Number.isFinite(n) ? Math.floor(n) : def;
@@ -230,17 +244,31 @@ const dataServer = http.createServer((req, res) => {
           if (RES_HEADER_ALLOW.has(k.toLowerCase())) safe[k] = v;
         }
         res.writeHead(upRes.statusCode, safe);
+        // Per-response line buffer: an SSE `data:` record can split across TCP chunks, so parse only
+        // COMPLETE lines and carry the partial tail forward (cage-match: a chunk-split undercounts
+        // usage → overspend). Pass through bytes verbatim; meter from the reassembled lines.
         const acc = { input: 0, output: 0 };
-        upRes.on("data", (c) => { scanUsage(c.toString("utf8"), acc); res.write(c); });
-        upRes.on("end", () => { settle(acc.input + acc.output); res.end(); });
+        let lineBuf = "";
+        upRes.on("data", (c) => {
+          res.write(c);
+          lineBuf += c.toString("utf8");
+          const nl = lineBuf.lastIndexOf("\n");
+          if (nl >= 0) { scanUsage(lineBuf.slice(0, nl), acc); lineBuf = lineBuf.slice(nl + 1); }
+        });
+        upRes.on("end", () => { if (lineBuf) scanUsage(lineBuf, acc); settle(acc.input + acc.output); res.end(); });
       }
     );
+    inFlight.set(up, nonce);
+    const done = () => inFlight.delete(up);
+    up.on("close", done);
     up.on("timeout", () => { up.destroy(new Error("upstream timeout")); });
     up.on("error", (e) => {
-      settle(0);
+      settle(0); done();
       if (!res.headersSent) { res.writeHead(502, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { type: "arena_auth_upstream", message: e.message } })); }
       else res.end();
     });
+    // Client (sandbox) gave up → stop spending on its behalf: abort the upstream request.
+    res.on("close", () => { if (!settled) { up.destroy(new Error("client aborted")); } });
     up.end(body);
   });
   req.on("error", () => settle(0));
@@ -255,11 +283,13 @@ const adminServer = http.createServer((req, res) => {
     return;
   }
   const chunks = [];
-  let size = 0;
-  req.on("data", (c) => { size += c.length; if (size <= MAX_BODY_BYTES) chunks.push(c); });
+  let size = 0, tooBig = false;
+  req.on("data", (c) => { size += c.length; if (size > MAX_BODY_BYTES) tooBig = true; else chunks.push(c); });
   req.on("end", () => {
-    let payload = {};
-    try { payload = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; } catch { /* {} */ }
+    if (tooBig) { res.writeHead(413, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "admin body too large" })); return; }
+    let payload, bad = false;
+    try { payload = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; } catch { bad = true; }
+    if (bad) { res.writeHead(400, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "malformed admin JSON" })); return; }
     if (req.method === "POST" && req.url === "/admin/nonce") {
       const nonce = mintNonce(payload);
       const e = nonces.get(nonce);
@@ -270,12 +300,14 @@ const adminServer = http.createServer((req, res) => {
     if (req.method === "POST" && req.url === "/admin/revoke") {
       const entry = nonces.get(payload.nonce);
       if (entry) entry.revoked = true;
+      abortInFlight((n) => n === payload.nonce); // actually cut in-flight spend for this nonce
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ revoked: Boolean(entry) }));
       return;
     }
     if (req.method === "POST" && req.url === "/admin/kill") {
       killed = payload.engaged !== false;
+      if (killed) abortInFlight(() => true); // a kill aborts every in-flight request, not just future ones
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ killed }));
       return;
@@ -311,7 +343,7 @@ function adminCall(route, payload) {
   });
 }
 
-export const _internal = { nonces, mintNonce, checkNonce, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS };
+export const _internal = { nonces, mintNonce, checkNonce, scanUsage, safeEqual, routeAllowed, dataServer, adminServer, setKilled: (v) => { killed = v; }, RESERVE_TOKENS, ADMIN_TOKEN };
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cmd = process.argv[2];

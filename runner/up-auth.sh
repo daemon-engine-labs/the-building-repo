@@ -28,7 +28,9 @@ RESTART_POLICY="${AUTH_RESTART_POLICY:-unless-stopped}"
 # sourcing wholesale imports unrelated shell content into the launcher context).
 REAL_OAUTH_TOKEN=""
 if [ -f "$HOME/.claude/.env" ]; then
-  _line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$HOME/.claude/.env" | tail -1)"
+  # `|| true`: grep exits 1 on no-match, which under `set -e` would abort before the fail-closed
+  # check below can emit its intended message (cage-match LOW).
+  _line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN=' "$HOME/.claude/.env" | tail -1 || true)"
   REAL_OAUTH_TOKEN="${_line#*=}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN%\"}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN#\"}"
   REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN%\'}"; REAL_OAUTH_TOKEN="${REAL_OAUTH_TOKEN#\'}"
 fi

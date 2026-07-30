@@ -151,6 +151,7 @@ done
 echo
 echo "[install] done. Verify with:"
 echo "  launchctl print $DOMAIN/com.daemon-engine.arena-egress | grep -E 'state|pid'"
-echo "  docker ps --filter name=egress   # the wall's proxy should be up"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-auth | grep -E 'state|pid'"
+echo "  docker ps --filter name=egress --filter name=arena-auth  # wall + spend-boundary proxies up"
 echo "  gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'"
 echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log"
