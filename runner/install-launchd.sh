@@ -7,7 +7,7 @@
 #   2. reap any legacy pre-launchd nohup loops (narrow, bash-invoked matches only).
 #   3. stop old runner containers BY SERVICE LABEL (arena-runner), now that nothing supervised is
 #      live to recreate them.
-#   4. install each plist with paths repointed at THIS checkout + $HOME via PlistBuddy (not sed —
+#   4. install each plist with paths repointed at the DEPLOY worktree ($DEPLOY_ROOT) + $HOME via PlistBuddy (not sed —
 #      no regex-metachar corruption of valid paths).
 #   5. bootstrap egress FIRST (it raises the wall), then the two runners.
 #
@@ -18,6 +18,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # Single-value fallback (NOT `git ... || pwd` — that precedence prints both).
 REPO_ROOT="$(git -C "$HERE/.." rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cd "$HERE/.." && pwd)"
+# The DEPLOY worktree — a dedicated, CI-fast-forwarded checkout the SUPERVISED services exec from, so
+# the running process is NEVER coupled to whatever branch a dev session has checked out at REPO_ROOT
+# (merge→run integrity — see runner/README.md + arena-autopull.sh). A dot-path signals "regenerable,
+# do not hand-edit". Overridable for tests via ARENA_DEPLOY_ROOT.
+DEPLOY_ROOT="${ARENA_DEPLOY_ROOT:-$HOME/.arena-deploy}"
+# arena-autopull requires a timeout command (it bounds every network call and REFUSES to run unbounded
+# — see arena-autopull.sh). GNU `timeout` is not on stock macOS; `gtimeout` comes from coreutils. Warn
+# LOUDLY at install if neither is present, so the operator fixes it now rather than discovering the
+# autopull daemon fail-closed-looping at its first tick (Tesla).
+command -v timeout >/dev/null || command -v gtimeout >/dev/null \
+  || echo "[install] WARNING: no timeout/gtimeout on PATH — arena-autopull will fail-closed every tick until you: brew install coreutils" >&2
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
 LA_DIR="$HOME/Library/LaunchAgents"
@@ -26,14 +37,17 @@ PLISTBUDDY=/usr/libexec/PlistBuddy
 # Egress FIRST so its wall is up before the runners bootstrap; runners self-heal if it isn't yet.
 # Egress FIRST (raises the wall), then arena-auth (the spend trust boundary — reuses the wall's
 # networks; up-auth.sh creates them if egress hasn't yet), then the two runners.
-AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-auth com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
+# Order: egress (raise the wall) → auth → autopull (the merge→run governor, spinning BEFORE the
+# ephemeral runners take load, so a runner can't register on stale code without the daemon present to
+# correct it — Carnot) → the two runners. autopull no-ops ("no idle runner yet") until they come up.
+AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-auth com.daemon-engine.arena-autopull com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
 
 # PlistBuddy takes the remainder of its -c line as the value, which safely handles spaces and regex
 # metacharacters (#, &, backslash) — but a newline or a double-quote in a path would break the command
 # grammar. Those are pathological for a filesystem path; reject them explicitly rather than silently
 # writing a corrupt plist, so the "path-safe rewrite" claim is honest.
-case "$REPO_ROOT$LOG_DIR" in
-  *\"*|*$'\n'*) echo "[install] ERROR: REPO_ROOT/LOG_DIR contains a quote or newline; refusing to rewrite plists." >&2; exit 1 ;;
+case "$REPO_ROOT$DEPLOY_ROOT$LOG_DIR" in
+  *\"*|*$'\n'*) echo "[install] ERROR: REPO_ROOT/DEPLOY_ROOT/LOG_DIR contains a quote or newline; refusing to rewrite plists." >&2; exit 1 ;;
 esac
 
 mkdir -p "$LA_DIR" "$LOG_DIR"
@@ -102,22 +116,97 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   docker rm -f arena-auth >/dev/null 2>&1 || true
 fi
 
+# --- 3b. Ensure the DEPLOY worktree exists and is current ----------------------------------------
+# The supervised services exec from $DEPLOY_ROOT, not the dev checkout at $REPO_ROOT. It is a linked
+# git worktree (shares $REPO_ROOT's object store — cheap, no second clone) checked out DETACHED at
+# origin/main: detached because a worktree may not share a branch name with another checkout, and a
+# deploy target wants a pinned commit anyway. arena-autopull.sh fast-forwards it on every merge.
+# Idempotent: if it is already a worktree we just fetch + ff it to origin/main here so a reinstall
+# lands current. Fail-CLOSED: if we cannot establish a clean deploy tree, abort — better no runners
+# than runners on an unknown tree.
+git -C "$REPO_ROOT" fetch --quiet origin main || { echo "[install] ERROR: git fetch origin main failed — cannot establish deploy worktree." >&2; exit 1; }
+# Recognize an existing deploy tree ONLY as a LINKED worktree of THIS repo — a linked worktree's .git
+# is a FILE (a gitdir: pointer), whereas a standalone clone's .git is a DIRECTORY. Testing
+# `--is-inside-work-tree` alone is true for ANY git checkout, so an unrelated standalone clone at
+# $DEPLOY_ROOT would be fast-forwarded toward OUR origin/main (Tesla). Require the .git-FILE marker AND
+# that its common dir belongs to $REPO_ROOT, else refuse.
+# Resolve a repo's git COMMON dir to an absolute, symlink-canonical path. `--git-common-dir` can be
+# RELATIVE (e.g. ".git"), and it must be resolved relative to THAT repo's dir, not the installer's CWD
+# (Carnot MEDIUM — a relative `cd "$_repo_git"` from outside the repo mis-resolved). And we compare
+# common-dir↔common-dir, never common-dir↔git-dir: run from a SECONDARY worktree, git-dir is
+# `.git/worktrees/<name>` while common-dir is the shared store, so a git-dir compare false-negatives a
+# healthy deploy tree (Tesla). cd into the repo FIRST so a relative common-dir resolves correctly.
+abs_common_dir() {   # $1 = a dir inside a git repo; echoes the canonical absolute git common dir
+  ( cd "$1" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P )
+}
+DEPLOY_IS_LINKED_WORKTREE=0
+if [ -f "$DEPLOY_ROOT/.git" ]; then
+  _deploy_common="$(abs_common_dir "$DEPLOY_ROOT")"
+  _repo_common="$(abs_common_dir "$REPO_ROOT")"
+  if [ -n "$_deploy_common" ] && [ -n "$_repo_common" ] && [ "$_deploy_common" = "$_repo_common" ]; then
+    DEPLOY_IS_LINKED_WORKTREE=1
+  fi
+fi
+if [ "$DEPLOY_IS_LINKED_WORKTREE" = "1" ]; then
+  echo "[install] deploy worktree exists at $DEPLOY_ROOT — fast-forwarding to origin/main"
+  # ff-only ONLY. Do NOT fall back to `checkout --detach origin/main`: that would silently discard any
+  # local commits in the deploy tree (Carnot HIGH — fail-OPEN on the exact anomaly the guard exists to
+  # surface). Mirror arena-autopull.sh's fail-closed stance: refuse loudly, keep git's real error.
+  if ! _ffout="$(git -C "$DEPLOY_ROOT" merge --ff-only origin/main 2>&1)"; then
+    echo "[install] ERROR: deploy worktree at $DEPLOY_ROOT could not fast-forward to origin/main — it may have diverged (local commits?). Resolve by hand; refusing to force." >&2
+    echo "[install]        git said: $_ffout" >&2
+    exit 1
+  fi
+  # The deploy target must be DETACHED at origin/main, not attached to a local branch. The create path
+  # detaches, but a reused tree could have been left on a branch that merely fast-forwards — then the
+  # services run from a branch checkout and autopull keeps merging into it, violating the pinned-deploy
+  # invariant (Carnot HIGH). If HEAD is attached, detach it at the (now fast-forwarded) origin/main.
+  if git -C "$DEPLOY_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    echo "[install] deploy worktree HEAD was attached to a branch — detaching at origin/main (pinned-deploy invariant)"
+    git -C "$DEPLOY_ROOT" checkout --detach origin/main >/dev/null 2>&1 \
+      || { echo "[install] ERROR: could not detach deploy worktree HEAD at origin/main." >&2; exit 1; }
+  fi
+elif [ -e "$DEPLOY_ROOT" ]; then
+  echo "[install] ERROR: $DEPLOY_ROOT exists but is not a linked worktree of $REPO_ROOT (a standalone clone or foreign dir?) — refusing to clobber it." >&2
+  exit 1
+else
+  echo "[install] creating deploy worktree at $DEPLOY_ROOT (detached @ origin/main)"
+  if ! _wtout="$(git -C "$REPO_ROOT" worktree add --detach "$DEPLOY_ROOT" origin/main 2>&1)"; then
+    echo "[install] ERROR: git worktree add failed for $DEPLOY_ROOT. git said: $_wtout" >&2
+    exit 1
+  fi
+fi
+
 # --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
 for label in "${AGENTS[@]}"; do
-  src="$HERE/$label.plist"
+  # Source plist TEMPLATES from the DEPLOY worktree, not $HERE (the dev checkout) — otherwise an
+  # operator on a feature/dirty/stale branch could install unmerged plist SEMANTICS (KeepAlive,
+  # StartInterval, env) even though the executable is repointed at detached origin/main, re-coupling the
+  # service DEFINITION to the dev tree (Carnot HIGH). The deploy tree was just fetched + fast-forwarded +
+  # detached above, so its plists are the merged, pinned definitions. Fall back to $HERE only if the
+  # deploy tree somehow lacks the file (shouldn't happen post-ff) so a first-run bootstrap can't wedge.
+  src="$DEPLOY_ROOT/runner/$label.plist"
+  [ -f "$src" ] || src="$HERE/$label.plist"
   dst="$LA_DIR/$label.plist"
   [ -f "$src" ] || { echo "[install] missing plist: $src" >&2; exit 1; }
   cp "$src" "$dst"
 
-  # Repoint the baked-in default paths at THIS checkout + $HOME. PlistBuddy Set takes literal
+  # Repoint the baked-in default paths at the DEPLOY worktree ($DEPLOY_ROOT) + $HOME. PlistBuddy Set takes literal
   # values — no sed/regex, so a path containing '#', '&', or a backslash cannot corrupt the plist.
   prog_base="$("$PLISTBUDDY" -c "Print :ProgramArguments:0" "$dst")"; prog_base="$(basename "$prog_base")"
   out_base="$("$PLISTBUDDY" -c "Print :StandardOutPath" "$dst")";     out_base="$(basename "$out_base")"
   err_base="$("$PLISTBUDDY" -c "Print :StandardErrorPath" "$dst")";   err_base="$(basename "$err_base")"
-  "$PLISTBUDDY" -c "Set :ProgramArguments:0 $REPO_ROOT/runner/$prog_base" "$dst"
-  "$PLISTBUDDY" -c "Set :WorkingDirectory $REPO_ROOT" "$dst"
+  # Supervised services exec from the DEPLOY worktree, never the dev checkout — this is the coupling
+  # removal that makes "merged == running" true. (The installer still RUNS from $REPO_ROOT/$HERE; only
+  # the installed services are repointed.)
+  "$PLISTBUDDY" -c "Set :ProgramArguments:0 $DEPLOY_ROOT/runner/$prog_base" "$dst"
+  "$PLISTBUDDY" -c "Set :WorkingDirectory $DEPLOY_ROOT" "$dst"
   "$PLISTBUDDY" -c "Set :StandardOutPath $LOG_DIR/$out_base" "$dst"
   "$PLISTBUDDY" -c "Set :StandardErrorPath $LOG_DIR/$err_base" "$dst"
+  # autopull carries an ARENA_DEPLOY_ROOT env var (the tree it fetches+ff's); repoint it too when present.
+  if "$PLISTBUDDY" -c "Print :EnvironmentVariables:ARENA_DEPLOY_ROOT" "$dst" >/dev/null 2>&1; then
+    "$PLISTBUDDY" -c "Set :EnvironmentVariables:ARENA_DEPLOY_ROOT $DEPLOY_ROOT" "$dst"
+  fi
 
   # Bootstrap fresh (agents were booted out + confirmed gone in step 1). Retry once on the rare
   # residual-teardown race rather than aborting the whole install under `set -e`.
@@ -149,9 +238,11 @@ for label in "${AGENTS[@]}"; do
 done
 
 echo
-echo "[install] done. Verify with:"
+echo "[install] done. Deploy worktree: $DEPLOY_ROOT (services exec from here, not $REPO_ROOT). Verify with:"
 echo "  launchctl print $DOMAIN/com.daemon-engine.arena-egress | grep -E 'state|pid'"
 echo "  launchctl print $DOMAIN/com.daemon-engine.arena-auth | grep -E 'state|pid'"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-autopull | grep -E 'state|pid'  # merge→run daemon"
+echo "  launchctl print $DOMAIN/com.daemon-engine.arena-sandbox | grep -E 'ProgramArguments' -A2  # points at $DEPLOY_ROOT"
 echo "  docker ps --filter name=egress --filter name=arena-auth  # wall + spend-boundary proxies up"
 echo "  gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'"
-echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log"
+echo "  tail -f $LOG_DIR/arena-privileged.log $LOG_DIR/arena-sandbox.log $LOG_DIR/arena-egress.log $LOG_DIR/arena-autopull.log"

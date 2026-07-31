@@ -23,8 +23,32 @@ RUNNER_KIND="privileged"
 FAIL_STATE="$HOME/.arena-${RUNNER_KIND}.fails"
 BACKOFF_BASE="${ARENA_BACKOFF_BASE:-10}"   # seconds
 BACKOFF_CAP="${ARENA_BACKOFF_CAP:-300}"    # seconds
+# Worktree we ACTUALLY exec from (script's own dir), for the drift stamp. Mirrors run-sandbox.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 command -v gh >/dev/null || { echo "gh CLI required"; exit 1; }
+
+# Merge→run drift stamp — read-only, never fetches, fully guarded (mirrors run-sandbox.sh). arena-
+# autopull.sh owns the fetch+ff+relaunch; this only makes the drift VISIBLE in the runner log.
+drift_stamp() {
+  local run ref
+  run="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  ref="$(git -C "$SCRIPT_DIR" rev-parse --short origin/main 2>/dev/null || true)"
+  if [ -z "$run" ]; then
+    echo "[privileged] drift-stamp: $SCRIPT_DIR is not a git worktree — skipping" >&2
+    return 0
+  fi
+  # $ref is the LOCAL origin/main tracking ref (fresh only as of the last fetch). Worktree-HEAD proxy
+  # for the running code, not in-memory process identity — labelled so "in sync" isn't over-read.
+  if [ -z "$ref" ]; then
+    echo "[privileged] worktree SHA $run (local origin/main UNRESOLVED — no ref; drift cannot be checked, not a clean bill)" >&2
+  elif [ "$run" != "$ref" ]; then
+    echo "[privileged] ⚠ DRIFT: worktree SHA $run != local origin/main $ref — this worktree predates a merge; arena-autopull should fast-forward + relaunch" >&2
+  else
+    echo "[privileged] worktree SHA $run == local origin/main $ref (in sync as of last fetch)" >&2
+  fi
+  return 0
+}
 
 # Drop bash's cached command→path table, then block until the docker daemon (colima VM) answers.
 # `hash -r` re-resolves docker/gh from PATH after any infra restart that moved the binary — the
@@ -44,6 +68,7 @@ wait_for_docker() {
 # wait_for_docker succeeds, so a non-zero return here is a real JOB failure (token already minted).
 run_job() {
   local token
+  drift_stamp   # visible merge→run drift check (read-only, best-effort) before we register
   token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token 2>/dev/null || true)"
   # Empty token = auth/keychain not ready, NOT a job failure. Return 2 → relaunch, no backoff.
   [ -n "$token" ] || { echo "[privileged] registration-token mint empty (gh auth/keychain not ready?) — relaunching" >&2; return 2; }

@@ -13,14 +13,15 @@ reachable only to allowlisted hosts.
 | `run-egress.sh` | supervise the egress wall: raise it, then `docker wait` the proxy so its death re-raises |
 | `run-sandbox.sh` | the ephemeral runner: register → run one job → exit (oneshot) or self-loop |
 | `run-privileged.sh` | same, labelled `privileged` (trusted code, direct egress) |
-| `com.daemon-engine.arena-*.plist` | launchd supervisors (egress + sandbox + privileged) — the durable replacement for nohup |
-| `install-launchd.sh` | install/reload all three LaunchAgents (idempotent, bootout-first) |
+| `com.daemon-engine.arena-*.plist` | launchd supervisors (egress + auth + sandbox + privileged + autopull) — the durable replacement for nohup |
+| `arena-autopull.sh` | merge→run integrity daemon — fast-forwards the deploy worktree + relaunches idle runners onto merged code |
+| `install-launchd.sh` | install/reload all LaunchAgents (idempotent, bootout-first); creates the deploy worktree |
 
 ## Bring it up (after `colima start`)
 
 ```bash
 docker build -t arena-sandbox-runner -f runner/Dockerfile runner
-runner/install-launchd.sh    # installs + starts the egress wall + both runners (three LaunchAgents)
+runner/install-launchd.sh    # installs the egress wall + auth + both runners + autopull (five LaunchAgents); creates the deploy worktree
 ```
 
 Manual / interactive alternative (no launchd — self-looping, Ctrl-C to stop):
@@ -47,30 +48,40 @@ Why launchd fixes it structurally:
 - **Explicit `PATH`** in the plist includes `/opt/homebrew/bin` — launchd's default `PATH` excludes
   it, which would otherwise reproduce the exact "command not found" bug this service prevents.
 
-### Three agents, and why egress is one of them
+### The agents, and why egress is one of them
 
-There are **three** LaunchAgents, not two. The sandbox runner has no route out except through the
-egress wall (`arena-internal` network + tinyproxy proxy), and a reboot tears those down. Nothing used
-to rebuild them — so after a reboot the sandbox runner would find `arena-internal` missing, exit, and
-launchd would relaunch it every 10s **forever** (a thrash, not a self-heal). `com.daemon-engine.arena-egress`
-closes that: `run-egress.sh` raises the wall (`up-egress.sh`) and then `docker wait`s on the proxy, so
-the agent lives exactly as long as the wall and its death re-raises. launchd is the wall's **single**
-supervisor — which is why `up-egress.sh` is told `EGRESS_RESTART_POLICY=no` here (a docker restart
-policy would be a second, fighting supervisor).
+There are **five** LaunchAgents: `arena-egress`, `arena-auth`, `arena-privileged`, `arena-sandbox`, and
+`arena-autopull` (the merge→run daemon — see "Merge→run integrity" below). The sandbox runner has no route out
+except through the egress wall (`arena-internal` network + tinyproxy proxy), and a reboot tears those
+down. Nothing used to rebuild them — so after a reboot the sandbox runner would find `arena-internal`
+missing, exit, and launchd would relaunch it every 10s **forever** (a thrash, not a self-heal).
+`com.daemon-engine.arena-egress` closes that: `run-egress.sh` raises the wall (`up-egress.sh`) and then
+`docker wait`s on the proxy, so the agent lives exactly as long as the wall and its death re-raises.
+launchd is the wall's **single** supervisor — which is why `up-egress.sh` is told
+`EGRESS_RESTART_POLICY=no` here (a docker restart policy would be a second, fighting supervisor).
 
-The installer is **bootout-first**: it unloads all three agents and waits for them to disappear
-*before* touching any process or container, so `KeepAlive` can't resurrect a runner mid-install (the
-race that made the old "just re-run it" claim untrue). Plists are repointed at this checkout with
-`PlistBuddy`, not `sed`, so a checkout path containing regex metacharacters can't corrupt them.
+The installer is **bootout-first**: it unloads all agents and waits for them to disappear *before*
+touching any process or container, so `KeepAlive` can't resurrect a runner mid-install (the race that
+made the old "just re-run it" claim untrue). Plists are repointed at the **deploy worktree** with
+`PlistBuddy`, not `sed`, so a path containing regex metacharacters can't corrupt them.
+
+**Scope of automatic merge→run (honest):** `arena-autopull` auto-relaunches only the two **ephemeral
+runners** (sandbox, privileged) — they idle-cycle safely. The long-lived `arena-egress` / `arena-auth`
+agents also exec from the deploy worktree (so a reinstall runs merged code), but they are NOT
+auto-relaunched on drift — kickstarting the egress wall would briefly drop every sandbox job's only
+route out. Their merged code activates on the next reinstall or container death. **Named residual:** a
+merged fix to `run-egress.sh` / `run-auth.sh` / `tinyproxy.conf` / allowlists can sit dark until then —
+run `install-launchd.sh` to force it live.
 
 ```bash
 runner/install-launchd.sh                                    # install/reload (idempotent, bootout-first)
 launchctl print gui/$(id -u)/com.daemon-engine.arena-egress | grep -E 'state|pid'
+launchctl print gui/$(id -u)/com.daemon-engine.arena-autopull | grep -E 'state|pid'   # merge→run daemon
 docker ps --filter name=egress                               # the wall's proxy should be up
 gh api repos/daemon-engine-labs/the-building-repo/actions/runners -q '.runners[].name'
-tail -f ~/Library/Logs/arena-{egress,privileged,sandbox}.log
+tail -f ~/Library/Logs/arena-{egress,privileged,sandbox,autopull}.log
 # uninstall:
-launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbox}
+launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,auth,privileged,sandbox,autopull}
 ```
 
 ### Operational caveats
@@ -94,6 +105,35 @@ launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbo
   also spaces clean job-to-job relaunches by ~10s. That's the price of the thrash cap on the failure
   path; lower it in the plists if you need tighter throughput and accept faster respawn on failures.
 
+## Merge→run integrity (deploy worktree + autopull)
+
+launchd relaunching a *fresh process* is not the same as the fresh process running *merged* code. The
+supervisor scripts exec from a git working tree, and an **idle ephemeral runner is the one state where
+oneshot never cycles** — it blocks in `./run.sh` waiting for a job, so a merge to `main` never activates
+until the next relaunch, which may never come. Observed live: a sandbox runner sat **8 days** on a
+pre-merge script while the merged security hardening sat un-run on disk. *Merged is not running.*
+
+Three mechanisms close the gap:
+
+- **Deploy worktree (removes the coupling).** The supervised services exec from a dedicated worktree at
+  `$HOME/.arena-deploy` (`ARENA_DEPLOY_ROOT`), **not** the dev checkout. `install-launchd.sh` creates it
+  as a linked worktree detached at `origin/main` and repoints every plist's `ProgramArguments`/
+  `WorkingDirectory` there. Editing or branch-switching the dev checkout can no longer change what the
+  live runner executes.
+- **`arena-autopull.sh` (makes activation deterministic).** A launchd `StartInterval=60` daemon: each
+  tick fetches `origin/main`, and on drift fast-forwards the deploy worktree (`--ff-only`, fail-closed on
+  divergence) and relaunches any **idle** runner onto the merged code. A **busy** runner is left alone —
+  it self-heals for free when its one ephemeral job finishes and launchd relaunches it. Idle-vs-busy is
+  read from GitHub's authoritative `busy` field, not guessed from container internals. Relaunch reaps the
+  orphaned `--rm` container + stale runner registration (launchd's SIGKILL skips docker `--rm` cleanup,
+  which otherwise leaves a stale runner *still online* beside the fresh one). `ARENA_AUTOPULL_DRYRUN=1`
+  previews a tick without mutating anything.
+- **Drift stamp (makes it visible).** `run-sandbox.sh`/`run-privileged.sh` log `running SHA X
+  (origin/main Y)` at registration, and a loud `⚠ DRIFT` line when they differ — read-only, never
+  fetches, fully guarded so it can't wedge the fail-open gate path.
+
+Drift is thus bounded to ≤ ~60s after a merge, and always visible in the runner log meanwhile.
+
 ## What makes this a wall, not a fence
 
 - **No direct route:** the runner sits on `arena-internal` (a `--internal` docker network). Its
@@ -108,11 +148,13 @@ launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,privileged,sandbo
 
 ## Verification status
 
-- **Proven live:** the two-runner launchd supervision has run on the host (both agents up, ephemeral
-  runners registering).
-- **Written + locally validated, not yet re-installed live:** the egress LaunchAgent, the bootout-first
-  installer, and the `PlistBuddy` path rewrite in *this* change. They pass `shellcheck`, `plutil -lint`,
-  and a `PlistBuddy`-rewrite dry-run against an adversarial checkout path — but a live `install-launchd.sh`
-  re-run on the runner host is the next gate before calling the three-agent topology done.
+- **Proven live:** the launchd runner supervision has run on the host (agents up, ephemeral runners
+  registering). The sandbox runner was force-relaunched onto merged code this session (merge→run Move 1).
+- **Written + locally validated, not yet re-installed live:** the deploy-worktree cutover, `arena-autopull`,
+  and the drift stamp in *this* change. Verified in isolation (drift stamp clean/⚠DRIFT/unresolved paths,
+  autopull dry-run against a behind worktree, ff-only on detached HEAD, the worktree-identity guard
+  accepting a linked worktree and rejecting a standalone clone) and via a 5-family cage match — but a live
+  `install-launchd.sh` cutover on the runner host is the next gate before calling the five-agent /
+  deploy-worktree topology done. That cutover is what makes merge→run integrity actually active.
 - **Best-known, unconfirmed:** the agent-CLI package names in the `Dockerfile` and the exact tinyproxy
   filter behaviour. Phase 2 proves these on a real runner.
