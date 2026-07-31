@@ -23,6 +23,12 @@ REPO_ROOT="$(git -C "$HERE/.." rev-parse --show-toplevel 2>/dev/null || true)"
 # (merge→run integrity — see runner/README.md + arena-autopull.sh). A dot-path signals "regenerable,
 # do not hand-edit". Overridable for tests via ARENA_DEPLOY_ROOT.
 DEPLOY_ROOT="${ARENA_DEPLOY_ROOT:-$HOME/.arena-deploy}"
+# arena-autopull requires a timeout command (it bounds every network call and REFUSES to run unbounded
+# — see arena-autopull.sh). GNU `timeout` is not on stock macOS; `gtimeout` comes from coreutils. Warn
+# LOUDLY at install if neither is present, so the operator fixes it now rather than discovering the
+# autopull daemon fail-closed-looping at its first tick (Tesla).
+command -v timeout >/dev/null || command -v gtimeout >/dev/null \
+  || echo "[install] WARNING: no timeout/gtimeout on PATH — arena-autopull will fail-closed every tick until you: brew install coreutils" >&2
 UID_NUM="$(id -u)"
 DOMAIN="gui/$UID_NUM"
 LA_DIR="$HOME/Library/LaunchAgents"

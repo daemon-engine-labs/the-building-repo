@@ -124,12 +124,26 @@ runner_state() {   # $1=ghlabel; stdout = rows, exit status = did we read the wh
     -q ".runners[] | select(any(.labels[]; .name == \"$1\")) | \"\(.id) \(.busy)\""
 }
 
-# De-register a set of IDLE runner ids from GitHub. Safe even next to a busy sibling: GitHub refuses to
-# DELETE a runner that is currently running a job (422), so a mis-identified id can never drop a live
-# job; and this touches only registrations, never containers. Bounded by `timeout`.
-deregister_idle() {   # $@ = runner ids
-  local rid
-  for rid in "$@"; do bounded 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true; done
+# De-register a set of IDLE runner ids from GitHub, and VERIFY each is actually gone. Safe even next to
+# a busy sibling: GitHub refuses to DELETE a runner currently running a job (422), so a mis-identified
+# id can never drop a live job; this touches only registrations, never containers. The DELETE is
+# LOAD-BEARING — the whole "made unschedulable before we leave it alone" invariant rests on it — so we
+# do NOT swallow its outcome (Carnot HIGH: `|| true` turned a failed DELETE into a false success).
+# We verify the COUNTERPARTY-OBSERVABLE outcome (a GET returning 404 = truly gone) rather than trusting
+# the DELETE exit code, which also can't tell "deleted" from "404 already gone". Returns non-zero if
+# ANY id could not be confirmed removed, so callers can fail-visible.
+deregister_idle() {   # $@ = runner ids; return 0 iff every id is confirmed gone
+  local rid rc=0
+  for rid in "$@"; do
+    bounded 30 gh api -X DELETE "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1 || true
+    # Invariant check: the runner must no longer exist. A GET that still succeeds means it is STILL
+    # registered and schedulable (DELETE failed on auth/network/perm) — surface it loudly.
+    if bounded 30 gh api "repos/$REPO/actions/runners/$rid" >/dev/null 2>&1; then
+      log "WARN: idle runner $rid STILL registered after de-register attempt (auth/network/perm?) — it may schedule on OLD code; will retry next tick"
+      rc=1
+    fi
+  done
+  return "$rc"
 }
 
 # True (exit 0) if any row in a roster text ("<id> <busy>" lines) is busy. Named for legibility so the
@@ -174,9 +188,12 @@ for spec in "${RUNNERS[@]}"; do
       log "$kind: a runner is BUSY, no idle registrations — self-heals on job completion"
     elif [ -n "$DRYRUN" ]; then
       log "[dry-run] $kind: BUSY sibling — would de-register idle registration(s) [${idle_ids# }] (no relaunch, no container reap)"
-    else
-      deregister_idle $idle_ids
+    elif deregister_idle $idle_ids; then
       log "$kind: BUSY sibling — not relaunching; de-registered stale idle registration(s) so they cannot schedule on old code"
+    else
+      # deregister_idle already logged which id(s) survived. Do NOT claim success — the stale runner may
+      # still be schedulable on old code; the next tick retries (still drifted / still idle).
+      log "$kind: BUSY sibling — de-registration INCOMPLETE (see WARN above); will retry next tick"
     fi
     continue
   fi
@@ -207,7 +224,11 @@ for spec in "${RUNNERS[@]}"; do
   # schedulable — a job could land on that pre-relaunch container in the window between kickstart and
   # deregister, then die under `docker rm -f`. De-registering first makes the old runner unschedulable
   # before we kill it (GitHub 422-protects a true busy mis-id), closing the post-kickstart orphan window.
-  deregister_idle $idle_ids
+  # A failed de-register here is backstopped by the kickstart below: SIGKILL disconnects the old
+  # ephemeral runner, and GitHub auto-removes an ephemeral runner on disconnect — so even an
+  # un-DELETE-able registration goes offline seconds later. deregister_idle already logged any failure;
+  # we proceed (unlike the busy branch, which has no kill to fall back on).
+  deregister_idle $idle_ids || log "$kind: de-register incomplete — relying on kickstart-disconnect to offline the stale ephemeral runner"
   # Do NOT swallow kickstart's stderr — a novel launchd failure must be legible in the log (Kelvin).
   launchctl kickstart -k "$DOMAIN/$label" || { log "$kind: kickstart failed (see stderr above) — will retry next tick"; continue; }
   # Reap the OLD container (launchd's SIGKILL skips docker --rm cleanup, orphaning it — observed). The
