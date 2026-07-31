@@ -214,8 +214,22 @@ for spec in "${RUNNERS[@]}"; do
   # the residual worst case is one interrupted job on a merge tick, surfaced by GitHub as a re-runnable
   # failed run — never silent corruption. A FAILED re-check is also fail-closed (skip).
   # Same set-e-safe form as above — a bare `recheck=$(...)` on failure would abort the script, not skip.
-  if ! recheck="$(runner_state "$ghlabel")" || rows_have_busy "$recheck"; then
-    log "$kind: became BUSY or re-check failed just before relaunch — skipping this tick (will heal on its job boundary)"
+  if ! recheck="$(runner_state "$ghlabel")"; then
+    log "$kind: re-check query failed just before relaunch — skipping this tick (fail-closed)"
+    continue
+  fi
+  if rows_have_busy "$recheck"; then
+    # A sibling went busy since the first read: do NOT kickstart (never interrupt) — but still
+    # de-register the confirmed-idle stale registration(s), exactly as the busy-branch does, so they
+    # can't schedule on old code during the one-tick window (Carnot MEDIUM: the pre-kickstart branch
+    # used to skip that cleanup). deregister_idle 422-tolerates a now-busy id and verifies each is gone.
+    if [ -n "$DRYRUN" ]; then
+      log "[dry-run] $kind: became BUSY at re-check — would de-register idle [${idle_ids# }], no kickstart"
+    elif deregister_idle $idle_ids; then
+      log "$kind: became BUSY at re-check — not kickstarting; de-registered stale idle registration(s)"
+    else
+      log "$kind: became BUSY at re-check — de-register incomplete (see WARN); will retry next tick"
+    fi
     continue
   fi
   log "$kind: idle & drifted — relaunching onto merged code"

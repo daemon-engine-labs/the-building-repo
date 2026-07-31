@@ -37,7 +37,10 @@ PLISTBUDDY=/usr/libexec/PlistBuddy
 # Egress FIRST so its wall is up before the runners bootstrap; runners self-heal if it isn't yet.
 # Egress FIRST (raises the wall), then arena-auth (the spend trust boundary — reuses the wall's
 # networks; up-auth.sh creates them if egress hasn't yet), then the two runners.
-AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-auth com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox com.daemon-engine.arena-autopull)
+# Order: egress (raise the wall) → auth → autopull (the merge→run governor, spinning BEFORE the
+# ephemeral runners take load, so a runner can't register on stale code without the daemon present to
+# correct it — Carnot) → the two runners. autopull no-ops ("no idle runner yet") until they come up.
+AGENTS=(com.daemon-engine.arena-egress com.daemon-engine.arena-auth com.daemon-engine.arena-autopull com.daemon-engine.arena-privileged com.daemon-engine.arena-sandbox)
 
 # PlistBuddy takes the remainder of its -c line as the value, which safely handles spaces and regex
 # metacharacters (#, &, backslash) — but a newline or a double-quote in a path would break the command
@@ -153,6 +156,15 @@ if [ "$DEPLOY_IS_LINKED_WORKTREE" = "1" ]; then
     echo "[install] ERROR: deploy worktree at $DEPLOY_ROOT could not fast-forward to origin/main — it may have diverged (local commits?). Resolve by hand; refusing to force." >&2
     echo "[install]        git said: $_ffout" >&2
     exit 1
+  fi
+  # The deploy target must be DETACHED at origin/main, not attached to a local branch. The create path
+  # detaches, but a reused tree could have been left on a branch that merely fast-forwards — then the
+  # services run from a branch checkout and autopull keeps merging into it, violating the pinned-deploy
+  # invariant (Carnot HIGH). If HEAD is attached, detach it at the (now fast-forwarded) origin/main.
+  if git -C "$DEPLOY_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    echo "[install] deploy worktree HEAD was attached to a branch — detaching at origin/main (pinned-deploy invariant)"
+    git -C "$DEPLOY_ROOT" checkout --detach origin/main >/dev/null 2>&1 \
+      || { echo "[install] ERROR: could not detach deploy worktree HEAD at origin/main." >&2; exit 1; }
   fi
 elif [ -e "$DEPLOY_ROOT" ]; then
   echo "[install] ERROR: $DEPLOY_ROOT exists but is not a linked worktree of $REPO_ROOT (a standalone clone or foreign dir?) — refusing to clobber it." >&2
