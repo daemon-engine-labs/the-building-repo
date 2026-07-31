@@ -179,7 +179,14 @@ fi
 
 # --- 4+5. Install each plist (PlistBuddy path rewrite) and bootstrap ------------------------------
 for label in "${AGENTS[@]}"; do
-  src="$HERE/$label.plist"
+  # Source plist TEMPLATES from the DEPLOY worktree, not $HERE (the dev checkout) — otherwise an
+  # operator on a feature/dirty/stale branch could install unmerged plist SEMANTICS (KeepAlive,
+  # StartInterval, env) even though the executable is repointed at detached origin/main, re-coupling the
+  # service DEFINITION to the dev tree (Carnot HIGH). The deploy tree was just fetched + fast-forwarded +
+  # detached above, so its plists are the merged, pinned definitions. Fall back to $HERE only if the
+  # deploy tree somehow lacks the file (shouldn't happen post-ff) so a first-run bootstrap can't wedge.
+  src="$DEPLOY_ROOT/runner/$label.plist"
+  [ -f "$src" ] || src="$HERE/$label.plist"
   dst="$LA_DIR/$label.plist"
   [ -f "$src" ] || { echo "[install] missing plist: $src" >&2; exit 1; }
   cp "$src" "$dst"
