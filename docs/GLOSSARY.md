@@ -20,7 +20,7 @@ The log line a runner emits comparing its worktree SHA to `origin/main`, making 
 
 ### gate
 
-The triage job that routes an issue to the trusted (allowlisted author) or untrusted (propose-only) build path, based on `github.actor` against `allowlist.txt`.
+The triage job that routes an issue to the trusted (allowlisted author) or untrusted (propose-only) build path, based on the issue **author** (`github.event.issue.user.login`, never `github.actor`) against `allowlist.txt` — the author is who wrote the request, whereas `github.actor` is merely who triggered the event (e.g. whoever added a label), so using the latter would be a privilege-escalation hole.
 
 ### heartbeat
 
