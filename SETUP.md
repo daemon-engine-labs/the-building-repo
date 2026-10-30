@@ -95,16 +95,17 @@ Allow 0.0.0.0/0
 # Filter file holds the allowlist as regexes; default deny.
 Filter "/etc/tinyproxy/allowlist.txt"
 FilterDefaultDeny Yes
-FilterExtended On
+FilterType ere
 ```
 
 ```bash
 docker network create --internal arena-internal     # no direct route to the internet
 docker network create arena-egress                  # proxy sits here, has internet
+docker build -t arena-egress-proxy runner/egress     # native tinyproxy, foreground (runner/egress/Dockerfile)
 docker run -d --name egress --network arena-egress \
   -v "$PWD/runner/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro" \
   -v "$PWD/runner/egress-allowlist.txt:/etc/tinyproxy/allowlist.txt:ro" \
-  vimagick/tinyproxy
+  arena-egress-proxy
 docker network connect arena-internal egress         # proxy bridges both networks
 ```
 
