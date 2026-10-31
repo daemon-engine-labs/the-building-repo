@@ -113,7 +113,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # unless install force-drops it. Install is the explicit "something changed" signal (Tesla's PR #17
   # catch: stale trust-boundary container survives rebuild); the arena-auth agent recreates it from
   # THIS checkout when it bootstraps.
-  docker rm -f arena-auth >/dev/null 2>&1 || true
+  docker rm -fv arena-auth >/dev/null 2>&1 || true
 fi
 
 # --- 3b. Ensure the DEPLOY worktree exists and is current ----------------------------------------
