@@ -73,7 +73,8 @@ auto-relaunched on drift — kickstarting the egress wall would briefly drop eve
 route out. Their merged code activates on the next reinstall or container death. **Named residual:** a
 merged fix to `run-egress.sh` / `run-auth.sh` / `tinyproxy.conf` / `egress/Dockerfile` / allowlists can
 sit dark until then — run `install-launchd.sh` to force it live, or for the proxy alone, `docker rm -fv
-egress` when no sandbox job is in flight (the agent rebuilds and re-raises within ~10s).
+egress` when no sandbox job is in flight. The agent re-raises within ~10s, plus a one-time image build
+if `egress/Dockerfile` changed; pre-build the new tag first (see `up-egress.sh`) to keep the gap at ~10s.
 
 ```bash
 runner/install-launchd.sh                                    # install/reload (idempotent, bootout-first)

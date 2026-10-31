@@ -17,6 +17,10 @@ RESTART_POLICY="${EGRESS_RESTART_POLICY:-unless-stopped}"
 # to the Dockerfile is a new tag that the reuse test below can see. Build only when the tag is missing:
 # once built, a relaunch needs no registry (the wall must come up at boot even if Docker Hub can't be
 # reached). Built BEFORE the reuse test, so a failed build aborts here and never tears down a running wall.
+# Keep it `docker build`, not `docker buildx build`. The plain command always uses this context's
+# docker-driver builder, which loads the image locally. `buildx build` follows the host-wide `buildx use`
+# selection, which another project can set to a docker-container builder; that build exits 0 WITHOUT
+# loading the image, so `docker run` below finds nothing and the wall stays down (measured 2026-10-31).
 EGRESS_IMAGE="arena-egress-proxy:$(shasum -a 256 egress/Dockerfile | cut -c1-12)"
 docker image inspect "$EGRESS_IMAGE" >/dev/null 2>&1 || docker build -q -t "$EGRESS_IMAGE" egress >/dev/null
 
@@ -32,10 +36,11 @@ on_internal() { [ "$(docker inspect -f '{{if index .NetworkSettings.Networks "ar
 # A relaunch of run-egress.sh (e.g. `docker wait` returned transiently) must not drop in-flight
 # sandbox jobs. Only (re)create when the proxy is absent, mis-policied, off the internal network, or
 # running a different image. Without the image check a superseded proxy (e.g. the old amd64
-# vimagick/tinyproxy) would be reused forever, until it happened to die.
+# vimagick/tinyproxy) would be reused forever, until it happened to die. Compare image IDs, not the
+# tag string: a tag rebuilt under a running container keeps its name but names different bytes.
 if [ "$(docker inspect -f '{{.State.Running}}' egress 2>/dev/null)" = "true" ] \
    && [ "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' egress 2>/dev/null)" = "$RESTART_POLICY" ] \
-   && [ "$(docker inspect -f '{{.Config.Image}}' egress 2>/dev/null)" = "$EGRESS_IMAGE" ] \
+   && [ "$(docker inspect -f '{{.Image}}' egress 2>/dev/null)" = "$(docker image inspect -f '{{.Id}}' "$EGRESS_IMAGE")" ] \
    && on_internal; then
   echo "[egress] proxy already healthy (running $EGRESS_IMAGE, restart=$RESTART_POLICY, on arena-internal) — leaving it in place."
 else
@@ -44,25 +49,19 @@ else
   docker rm -fv egress >/dev/null 2>&1 || true
   # Least privilege for a component the hostile-code sandbox talks to directly: no capabilities,
   # no privilege gain, read-only root filesystem (tinyproxy writes nothing; see egress/Dockerfile).
-  docker run -d --name egress --network arena-egress --restart "$RESTART_POLICY" \
+  # BOTH networks at creation (Docker API >= 1.44), so the proxy is never running on arena-egress
+  # alone. The old start-then-`network connect` had a half-wall state in between, guarded by stderr
+  # classification; creating with both removes the state instead. arena-internal is --internal and
+  # has no gateway, so the default route is always arena-egress's.
+  docker run -d --name egress --network arena-egress --network arena-internal --restart "$RESTART_POLICY" \
     --read-only --cap-drop ALL --security-opt no-new-privileges \
     -v "$PWD/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro" \
     -v "$PWD/egress-allowlist.txt:/etc/tinyproxy/allowlist.txt:ro" \
     "$EGRESS_IMAGE"
-  # Bridge into the internal network, tolerating ONLY "already connected". A swallowed real failure
-  # would leave the proxy on arena-egress but NOT arena-internal — a half-wall that reads as success
-  # while the runner has no route out. So distinguish the cases, then ASSERT the bridge exists.
-  if ! docker network connect arena-internal egress 2>/tmp/egress-connect-err.$$; then
-    grep -qiE 'already (exists|connected|in use)' /tmp/egress-connect-err.$$ || {
-      echo "[egress] FAILED to bridge proxy onto arena-internal:" >&2; cat /tmp/egress-connect-err.$$ >&2
-      rm -f /tmp/egress-connect-err.$$; exit 1
-    }
-  fi
-  rm -f /tmp/egress-connect-err.$$
 fi
 
-# Fail CLOSED on a half-wall: the proxy MUST be on arena-internal, or the sandbox has no route out
-# and would mint tokens into a dead network.
+# Postcondition, for both branches: the proxy MUST be on arena-internal, or the sandbox has no route
+# out and would mint tokens into a dead network. Fail CLOSED rather than report a half-wall as up.
 on_internal || { echo "[egress] proxy is NOT on arena-internal — refusing to report a half-wall as up." >&2; exit 1; }
 
 echo "[egress] proxy up (restart=$RESTART_POLICY); runner network 'arena-internal' has no direct internet route."

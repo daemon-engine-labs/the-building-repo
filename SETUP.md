@@ -66,47 +66,18 @@ docker context use colima
 
 ### 1b. An egress-allowlist proxy (the wall)
 
-Everything the runner does goes through a proxy that only permits known hosts. Create
-`runner/egress-allowlist.txt` (domains the agents legitimately need):
+Everything the runner does goes through a tinyproxy sidecar that only permits known hosts. The wall
+lives in `runner/`, and those files are the only copy (an inline copy here drifted into an unanchored,
+leaky allowlist, so it was removed):
 
-```
-# GitHub (git + Actions backend — required or the runner can't function)
-github.com
-api.github.com
-codeload.github.com
-.actions.githubusercontent.com
-objects.githubusercontent.com
-pkg-containers.githubusercontent.com
-# Model APIs
-api.anthropic.com
-api.openai.com
-generativelanguage.googleapis.com
-# Package registries the build may need (tighten later)
-registry.npmjs.org
-pypi.org
-files.pythonhosted.org
-```
-
-Run `tinyproxy` (or `squid`) with that allowlist as a sidecar. Minimal `tinyproxy.conf`:
-
-```
-Port 8888
-Allow 0.0.0.0/0
-# Filter file holds the allowlist as regexes; default deny.
-Filter "/etc/tinyproxy/allowlist.txt"
-FilterDefaultDeny Yes
-FilterType ere
-```
+- `runner/egress-allowlist.txt`: the hosts the agents legitimately need, as **anchored** extended
+  regexes (`(^|\.)github\.com$`). An unanchored `github.com` would also match `github.com.attacker.tld`.
+- `runner/tinyproxy.conf`: default-deny, `FilterType ere`, CONNECT only to 443/80.
+- `runner/egress/Dockerfile`: native tinyproxy, run in the foreground.
+- `runner/up-egress.sh`: creates both networks, builds the image, and starts the proxy on both.
 
 ```bash
-docker network create --internal arena-internal     # no direct route to the internet
-docker network create arena-egress                  # proxy sits here, has internet
-docker build -t arena-egress-proxy runner/egress     # native tinyproxy, foreground (runner/egress/Dockerfile)
-docker run -d --name egress --network arena-egress \
-  -v "$PWD/runner/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro" \
-  -v "$PWD/runner/egress-allowlist.txt:/etc/tinyproxy/allowlist.txt:ro" \
-  arena-egress-proxy
-docker network connect arena-internal egress         # proxy bridges both networks
+bash runner/up-egress.sh     # idempotent; under launchd, com.daemon-engine.arena-egress runs it for you
 ```
 
 The runner container attaches to **`arena-internal` only** (no default route) and is forced
