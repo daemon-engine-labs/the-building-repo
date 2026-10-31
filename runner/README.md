@@ -7,6 +7,7 @@ reachable only to allowlisted hosts.
 | File | Role |
 |---|---|
 | `Dockerfile` | runner image = official Actions runner + Node 20 + the three agent CLIs |
+| `egress/Dockerfile` | the egress proxy image: native Alpine tinyproxy, foreground, unprivileged user |
 | `tinyproxy.conf` | default-deny egress proxy config |
 | `egress-allowlist.txt` | the only hosts the runner may reach (anchored regexes) |
 | `up-egress.sh` | create the two docker networks + start the proxy (idempotent) |
@@ -70,8 +71,10 @@ runners** (sandbox, privileged) — they idle-cycle safely. The long-lived `aren
 agents also exec from the deploy worktree (so a reinstall runs merged code), but they are NOT
 auto-relaunched on drift — kickstarting the egress wall would briefly drop every sandbox job's only
 route out. Their merged code activates on the next reinstall or container death. **Named residual:** a
-merged fix to `run-egress.sh` / `run-auth.sh` / `tinyproxy.conf` / allowlists can sit dark until then —
-run `install-launchd.sh` to force it live.
+merged fix to `run-egress.sh` / `run-auth.sh` / `tinyproxy.conf` / `egress/Dockerfile` / allowlists can
+sit dark until then — run `install-launchd.sh` to force it live, or for the proxy alone, `docker rm -fv
+egress` when no sandbox job is in flight. The agent re-raises within ~10s, plus a one-time image build
+if `egress/Dockerfile` changed; pre-build the new tag first (see `up-egress.sh`) to keep the gap at ~10s.
 
 ```bash
 runner/install-launchd.sh                                    # install/reload (idempotent, bootout-first)
@@ -99,8 +102,9 @@ launchctl bootout gui/$(id -u)/com.daemon-engine.arena-{egress,auth,privileged,s
   window, or expect one interrupted build.
 - **Changing `tinyproxy.conf` or `egress-allowlist.txt` needs a proxy recreate.** The egress agent
   *reuses* a healthy proxy (so a supervisor relaunch never drops live jobs), which means it will not
-  pick up an edited allowlist on its own. Force it: `docker rm -f egress` (the agent re-raises within
-  ~10s with the new config).
+  pick up an edited allowlist on its own. Force it: `docker rm -fv egress` (the agent re-raises within
+  ~10s with the new config). An edit to `egress/Dockerfile` is different: it changes the image tag, so
+  the reuse test recreates the proxy by itself, but only when the agent next relaunches.
 - **~10s between jobs is intentional.** `ThrottleInterval=10` caps the KeepAlive respawn rate, which
   also spaces clean job-to-job relaunches by ~10s. That's the price of the thrash cap on the failure
   path; lower it in the plists if you need tighter throughput and accept faster respawn on failures.
@@ -156,5 +160,8 @@ Drift is thus bounded to ≤ ~60s after a merge, and always visible in the runne
   accepting a linked worktree and rejecting a standalone clone) and via a 5-family cage match — but a live
   `install-launchd.sh` cutover on the runner host is the next gate before calling the five-agent /
   deploy-worktree topology done. That cutover is what makes merge→run integrity actually active.
-- **Best-known, unconfirmed:** the agent-CLI package names in the `Dockerfile` and the exact tinyproxy
-  filter behaviour. Phase 2 proves these on a real runner.
+- **Best-known, unconfirmed:** the agent-CLI package names in the `Dockerfile`. Phase 2 proves these on
+  a real runner. (The tinyproxy filter behaviour is confirmed, on a throwaway copy of the wall's two
+  networks with this conf + allowlist: from the internal network, `api.github.com` and bare
+  `github.com` pass, and bare `github.com` passes only under ERE. `example.org`, `github.com.example.org`,
+  CONNECT to `github.com:22`, and direct egress with no proxy are all refused.)

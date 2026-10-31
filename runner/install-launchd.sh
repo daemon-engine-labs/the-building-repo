@@ -107,7 +107,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # checkout, or after editing tinyproxy.conf/allowlist, would otherwise keep supervising the OLD
   # proxy with stale bind-mount paths. Install is the explicit "something changed" signal, so drop the
   # proxy here; the egress agent recreates it from THIS checkout when it bootstraps below.
-  docker rm -f egress >/dev/null 2>&1 || true
+  docker rm -fv egress >/dev/null 2>&1 || true
   # Same reasoning for arena-auth (the spend trust boundary): up-auth.sh REUSES a healthy container
   # at runtime, so a security fix to server.mjs would stay dark under KeepAlive's "already healthy"
   # unless install force-drops it. Install is the explicit "something changed" signal (Tesla's PR #17
