@@ -1,6 +1,6 @@
 # DESIGN — Egress wall lifecycle: make "down, or wrong, and nobody knows" unreachable
 
-> **Status (2026-11-03): ROUND 2 — re-strike of the RECAST.** The first candidate below (a
+> **Status (2026-11-03): ROUND 2 struck (RECAST, 4/4) and folded once — see "ROUND 2 FOLD" at the end, which amends the RECAST. UN-TEMPERED for build until a round-3 strike.** Round-2 brief, kept for the record: **ROUND 2 — re-strike of the RECAST.** The first candidate below (a
 > long-lived wall + reconcile + watcher) was struck by four families in run `dt-egress45` (RECAST;
 > see `TEMPER.md`). **The candidate under strike now is ONLY the "RECAST — the proxy is a sidecar of
 > the sandbox runner" section at the end, plus the measurements it cites (M1–M11).** Everything
@@ -407,3 +407,101 @@ service through a workflow secret), the check period and the offline grace T, an
 jobs, so its long-lived reconcile problem is real. The long-lived-frame fold-backs in `TEMPER.md`
 (serialize, validate before publish, an IP rather than an alias, network ID in the spec,
 provenance-only labels) are the right inputs for `arena-auth`'s design, not for this one.
+
+## ROUND 2 FOLD (dt-egress45-r2, 2026-11-03): what the re-strike changed in the sidecar
+
+**Verdict of the re-strike: RECAST, 4/4, 0 DISSOLVE.** The sidecar frame held under every family,
+and every fatal flaw sits inside it. Full strikes are in `TEMPER.md` (round 2). This section **amends
+the RECAST above**: where the two disagree, this section wins. Folded once, as the directive
+requires; **not re-struck**. Status: `RECAST (round 2 folded) — UN-TEMPERED for build until a
+round-3 strike` (≤ 3 rounds).
+
+### F1. One identity per pair. The stable dial name `egress` is deleted (all four families)
+The recast justified `docker rm -fv egress` at `run_job` start with "the proxy's only client doesn't
+exist yet", and claim 3 with "one launchd label". Both are false under SIGKILL. launchd serializes
+*scripts*, not *containers*, and `kickstart -k`, OOM, and manual kills skip `run_job`'s teardown, so
+the runner **container** survives, still registered (M11d: it retries, it doesn't exit). The next
+`run_job` republishes `egress`, and **M11e** heals the orphan onto it within ~30 s. That leaves two
+registered runners on one wall, one of them unowned, and erases the offline blip the pager needs.
+**Make the heal unproduceable rather than guard it:**
+- Each `run_job` mints a pair id (`P`) and names the proxy **`egress-$P`**. The runner gets
+  `HTTPS_PROXY=http://egress-$P:8888` and nothing else. An orphan keeps dialing a name that **never
+  reappears**, so no successor can answer it. Both containers carry the label `arena.pair=$P`, and
+  teardown and waits use the **container IDs captured at create** (Carnot), never names.
+- **Start sweep, in this order:** (1) every container labelled `arena-runner=sandbox`: de-register
+  its GitHub runner, **verify 404**, then `rm -fv`; (2) then every proxy labelled `arena.pair`.
+  Runners first, because reaping a proxy while its runner survives is exactly the M11e path.
+  `arena-autopull.sh`'s reap gets the same order.
+- *Optional, not required:* a private `--internal` network per pair (Carnot). Unique names already
+  close the heal, since orphans dial by name. If adopted, note the constraint: the runner still
+  needs `arena-auth` on `arena-internal`, so the topology becomes pair-net = {runner, proxy},
+  `arena-internal` = {runners, arena-auth} with **no proxy on it**, and `arena-egress` = {proxies,
+  arena-auth}.
+
+### F2. The failure counter: decided, stateless (all four; three explicitly chose this)
+`~/.arena-sandbox.fails` and its backoff ladder are **deleted** for the sandbox runner. launchd's
+`ThrottleInterval 10` already caps registration-token mints at ≤ 360/h. The file was measured
+lying: stuck at 5 for 2.5 months, then a graceful idle stop was charged as #6 → 300 s. A state file
+under `set -e` is also the class that regressed twice. `run_job` still returns distinct codes (gate
+failure, pair ended by proxy death, idle stop, job failed, clean), **for the log and the event path
+(F3), not for any state.** (The privileged runner keeps its own counter. Changing it is outside this
+design.) The nonce minted at registration (`run-sandbox.sh:170`) is still a live coupling; #35
+(https://github.com/daemon-engine-labs/the-building-repo/issues/35) is its producer fix, and the
+refresh-stop is no longer charged because nothing is charged.
+
+### F3. The pager pages the *difference*, keeps its own history, and has a dead-man (all four, different facets)
+- **Predicate:** `privileged runner online ∧ no online sandbox runner`, **observed in every one of k
+  reads spread across ≥ T inside a single scheduled run** (e.g. 3 reads over 3 minutes). That makes
+  the duration measurable without stored state (Carnot), lets normal between-job re-registration gaps
+  (~12–18 s, M11a, plus a ~2–10 s pair birth, M10) pass, and stays **quiet when the whole host is
+  down or asleep** (the privileged runner is offline too), so a sleeping Mac or a stopped colima
+  doesn't train Nick to mute it (Maxwell, Tesla). Privileged traffic doesn't cross the wall, so the
+  difference points at the wall/sandbox path.
+- **Events for fast loops:** sampling can't see a pair that dies and recovers between reads (Carnot),
+  so `run_job` **emits one event per pair that ends by proxy death** (its distinct return code) to the
+  same channel, best-effort, with no stored state. If the writer itself can't run, the runner is
+  offline and the differential predicate pages, so each covers the other's blind spot.
+- **Dead-man for the checker (Noether):** the existing daily GitHub-hosted heartbeat reads the
+  checker workflow's last successful run through the Actions API and pages if it is older than 2P.
+- **Stated blind spot:** GitHub Actions scheduling *and* the box failing together page nothing.
+- Still Nick's: the channel (non-public), the period P, T and k.
+
+### F4. Idle wedge: how it ends
+_(filled from M11g below)_
+
+### F5. The thesis period, stated honestly (Tesla; Carnot)
+The pair is scoped to a **runner registration**, not to a job. A sandbox runner idles for long
+stretches (jobs are rare: the counter sat untouched for 2.5 months), so a pair can live for days.
+What still holds over that idle age:
+- **Policy can't drift mid-life.** The rootfs is read-only. The conf and allowlist are bind-mounted
+  read-only from inodes that a git fast-forward *replaces* rather than mutates (verified in
+  `arena-autopull.sh`'s notes), and nothing signals tinyproxy to reload. So the birth deny-canary
+  sample stays valid for the pair's life, except for root-equivalent tampering (the P5 residual).
+- **Liveness** over the idle age is GitHub's continuous long-poll view (M11b–c, M11f), read by F3.
+- **Unmeasured and load-bearing:** the long-poll crossing the proxy over *hours* (M11b covered 240 s).
+  F3's predicate is what would catch it failing.
+
+**Alternative recorded, not adopted in this pass: a job-scoped pair.** Raise the pair only when a
+`[self-hosted, sandbox]` job is queued, register a JIT runner (`generate-jitconfig`), and destroy
+both when the job ends. That makes the birth sample cover the entire life, and "no online runner"
+stops being an alarm at all. Cost: a **queued-job event source on the box** (a poller, or a webhook
+relay), which is a new component whose silence is the original defect, plus per-job startup latency.
+That's a frame decision for Nick, not something to fold silently.
+
+### F6. The claims, narrowed (Noether, Tesla)
+- Registration proves the **control-plane route** at birth. The deny canary proves **default-deny**
+  at birth. Neither proves the allowlist is *right* for job traffic: a missing needed host shows up
+  as a **job failure**, not through the wall's checks. That is now stated rather than implied.
+- Member 1 ("silent relaunch loop") is **deleted only together with F3's event path**. Sampling alone
+  doesn't delete it (Carnot).
+
+### Fold-back of the class table (supersedes the recast's table where they differ)
+| Member | Round-2 status |
+|---|---|
+| 1. Silent relaunch loop | Deleted with F2 (no backoff state) + F3 (events + differential page) |
+| 2. Postcondition passes a dead proxy | Deleted (birth gate + registration) |
+| 3. Remove before create | Dissolved; F1 makes it hold under SIGKILL too |
+| 4. Wedge reused / never ends | See F4 |
+| 5. Reuse blind to flags | Dissolved (no reuse, unique pair per start) |
+| 6. `--internal` assumed | Residual check, asserted at every start |
+| M11e silent heal | **Unproduceable** (F1 unique dial name + runners-first sweep) |

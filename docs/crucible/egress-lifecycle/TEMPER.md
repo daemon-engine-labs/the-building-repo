@@ -1,11 +1,39 @@
 # TEMPER.md — Egress wall lifecycle (#45)
 
-## ROUND 2 — re-strike of the sidecar RECAST  ⏳ STRIKE IN PROGRESS
+## ROUND 2 — re-strike of the sidecar RECAST
 
-**Overall verdict:** _pending — 4 of 4 families returned; synthesis next_
-**Struck:** dt-egress45-r2 (2026-11-03) · landed: Maxwell, Carnot, Noether, Tesla, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
+**Overall verdict:** RECAST
+**Struck:** dt-egress45-r2 (2026-11-03). Families seated: Maxwell + Noether + Carnot + Tesla (4/4; Wu disabled). Noether ran at high, Carnot and Tesla at medium. Candidate: the sidecar RECAST with M11 measured (`a5a875c`); M11g was added during the strike.
 
-<!-- Each section below was written when that family returned, before the others finished. Arrival order, NOT a ranking. The synthesis replaces this header; if it never runs, what is here is still real. -->
+### Per-family verdicts
+| Family | Verdict | One-line |
+|--------|---------|----------|
+| Maxwell (Claude, the author) | RECAST | One launchd label ≠ one container (the orphan heals onto the next `egress`). Page the *difference* (privileged on, sandbox off), not the absence. Decide the counter (stateless). Measure the runner's retry budget before choosing a wedge end. |
+| Carnot (GPT-6.1-sol) | RECAST | Each pair should be an isolated ownership unit (unique identity, optional private network, teardown by container ID). Sampled availability can't see a fast relaunch loop. Write the monitor's contract. Decide the counter and the wedge policy. |
+| Noether (DeepSeek V4.1 Flash) | RECAST | The singleton `egress` breaks "one proxy ↔ one runner". An idle wedge has no end. The counter is undecided (prefers stateless). The off-box check has no dead-man. Registration proves the GitHub route, not the allowlist. |
+| Tesla (Grok) | RECAST | The thesis period is wrong: the pair lives for a *resident idle registration*, not a job. Delete the stable dial name. **Never** end a pair on GitHub-offline. Delete the fail file. Stop equating "runner absent" with "wall failed". |
+
+**Synthesis rule.** 0 DISSOLVE and 4 RECAST, so the verdict is **RECAST**. The sidecar frame held under every family; every flaw is inside it.
+
+### Fatal flaws (deduped, most-severe first) → disposition
+1. **The stable dial name `egress` plus a SIGKILL orphan runner gives a silent heal (M11e).** "One launchd label" serializes scripts, not containers, and `rm -fv egress` is not safe when the old runner survives. *All four.* → **FOLDED (F1):** a per-pair proxy name `egress-$P`, so an orphan's dial target never reappears; teardown by captured container IDs; start sweep reaps runners first (de-register, verify 404), then proxies; autopull uses the same order. A private network per pair is recorded as optional, with its `arena-auth` topology constraint.
+2. **The failure-counter fork was undecided** while the recast multiplies the exits that hit a counter already measured stale. *All four.* → **FOLDED (F2): decided stateless.** The file and backoff are deleted for the sandbox runner; launchd's 10 s throttle caps mints. Return codes stay, for logs and events only.
+3. **The pager:** it equates "runner absent" with "wall failed" (host sleep and colima stops page); sampled availability misses fast loops and heals inside T; there's no dead-man; there's no contract. *All four, different facets.* → **FOLDED (F3):** the differential predicate `privileged online ∧ no online sandbox` over k reads spanning ≥ T inside one run (a stateless duration); one event per pair ended by proxy death; the daily heartbeat is the checker's dead-man; the remaining blind spot is stated. Channel, P, T and k stay **Nick's**.
+4. **An idle wedge never ends**, and the trigger is contested: Noether wants GitHub-offline > G; **Tesla rejects that** (GitHub, broker or host-sleep blips would demolish healthy pairs, mid-job too); Maxwell says measure first; Carnot says decide. → **Resolved by measurement M11g (F4).**
+5. **The thesis period:** the pair lives for an idle registration, not a job, so the birth sample covers only t=0. *Tesla, Carnot.* → **NAMED TRADEOFF (F5), with an argument:** policy can't drift mid-life (read-only rootfs, read-only bind mounts of replaced-not-mutated inodes, no reload), so the birth sample holds except under root-equivalent tampering (P5). The long-poll over *hours* stays unmeasured and load-bearing. The **job-scoped JIT alternative** is recorded for Nick, not adopted: it needs a queued-job event source on the box.
+6. **Overclaim: registration ≠ a correct allowlist.** *Noether, Tesla.* → **FOLDED (F6):** claims narrowed; a missing needed host shows up as a job failure.
+
+### What holds (cross-family)
+- The sidecar frame, creation-only health gating, and the deletion of the round-1 long-lived machinery (watcher, spec label, swap, reconcile, egress LaunchAgent).
+- M11 as evidence: GitHub's runner status sees proxy death (≤ 33 s) and a wedge (≤ 64 s), so the off-box reader really sees the wall.
+- `docker wait <proxy>` → end the pair is load-bearing (M11d).
+- Classifying gate failure, proxy death and idle stop as infra. `arena-auth` stays long-lived (it holds nonce state); round 1's fold-backs belong to its design.
+- `Internal == true` stays an honest residual (the socket is root-equivalent).
+
+### Disposition
+RECAST, folded **once** into `DESIGN.md` as "ROUND 2 FOLD" (F1–F6). **Not re-struck.** It is `UN-TEMPERED for build` until a round-3 strike (≤ 3 rounds total). Open for Nick: the pager channel, P/T/k, and sidecar-per-registration (as folded) vs a job-scoped JIT pair.
+
+<!-- Per-family strikes below, in arrival order (Maxwell composed in-process first, then Carnot, Noether, Tesla). Arrival order, NOT a ranking. -->
 
 ### MaxwellMergeSlam's Design Strike
 
