@@ -1,10 +1,12 @@
 # DESIGN — Egress wall lifecycle: make "down, or wrong, and nobody knows" unreachable
 
-> **Status (2026-10-31): RECAST.** The first candidate below (a long-lived wall + reconcile +
-> watcher) was struck by four families in run `dt-egress45`; see `TEMPER.md` and the TEMPER
-> RESULTS section at the end. The **current candidate is the RECAST at the end: the proxy becomes a
-> sidecar of the sandbox runner.** That recast has **not** been struck itself. It is
-> `UN-TEMPERED (provisional)` until a re-strike, and must not be built on this document alone.
+> **Status (2026-11-03): ROUND 2 — re-strike of the RECAST.** The first candidate below (a
+> long-lived wall + reconcile + watcher) was struck by four families in run `dt-egress45` (RECAST;
+> see `TEMPER.md`). **The candidate under strike now is ONLY the "RECAST — the proxy is a sidecar of
+> the sandbox runner" section at the end, plus the measurements it cites (M1–M11).** Everything
+> above that section is the round-1 candidate, kept as history and as the fallback if the sidecar
+> fails. Strike the sidecar; don't re-strike the retired long-lived design. M11 (added for this
+> round) replaces the recast's key *claim* with a *measurement*.
 
 Issue: #45 (https://github.com/daemon-engine-labs/the-building-repo/issues/45). Origin: the two-round
 cage-match on #44 (https://github.com/daemon-engine-labs/the-building-repo/pull/44), whose round-2
@@ -284,6 +286,76 @@ are decoupled. Couple them.
 **~10 s** with `--interval=10s`, and **~2 s** with `--start-interval=1s` (Docker ≥ 25). That's the
 per-job registration-gate cost.
 
+**M11 — the recast's key claim, measured (2026-11-03, round 2).** Setup: a real ephemeral Actions
+runner (`arena-sandbox-runner` image, runner 2.338.2) registered with this repo under a unique
+label and `--no-default-labels` (so nothing could dispatch to it). It sat on an `--internal`
+throwaway network whose only route out was a throwaway tinyproxy sidecar built from
+`runner/egress/Dockerfile`. Its status was read from GitHub's runner API every 10 s, so every time
+below is an upper bound with 10 s granularity. Afterwards it was de-registered (GET → 404) and all
+`egtest-probe-*` artifacts were removed.
+
+| # | Event | Result |
+|---|---|---|
+| M11a | Registration with the proxy as the only route | **online in 18 s**. Registration works entirely through the wall. |
+| M11b | 240 s idle | **27 new CONNECTs** through the proxy (`broker.actions.githubusercontent.com`, `pipelines…actions.githubusercontent.com`, `api.github.com`, `github.com`, `release-assets…`). The idle long-poll crosses the wall continuously. Measured over minutes, not the hours claim 1 asked for. |
+| M11c | Proxy **SIGKILL**ed while idle | GitHub shows the runner **offline in ≤ 33 s** |
+| M11d | …the runner process | **does not exit.** It retries the broker with backoff (`Socket Error: TryAgain`, "4 attempts left"), and the container is still `running` at +33 s and through the next phase. So the runner will never end the pair by itself; something else has to. |
+| M11e | The same-named proxy is **restarted** | the *old* runner is **back online in ≤ 32 s by itself**. A recreated proxy silently heals the old runner. |
+| M11f | Proxy **wedged** (`docker pause`, a freezer like SIGSTOP) while idle | GitHub shows the runner **offline in ≤ 64 s**. On unpause it's online again at the first poll. |
+| — | Not measured | how long the runner keeps retrying before it gives up (if it ever does); idle behaviour over hours |
+
+**What M11 changes in the recast.**
+- Claims 1 and 2 hold at the minutes scale. **GitHub's runner status really does see the wall**,
+  both its death (≤ 33 s) and a wedge (≤ 64 s), so the off-box check reads a signal that crosses
+  the proxy. Detection is bounded by the check period, plus up to ~1 min.
+- M11d makes shape step 3's `docker wait <proxy>` → remove-the-runner **load-bearing**, not
+  optional. Without it, a dead proxy leaves a runner retrying forever, and the pair never ends.
+- M11e cuts both ways. It is why nothing may recreate the proxy mid-life (a silent heal would
+  erase the offline blip that the off-box check depends on). And `rm -fv egress` at `run_job`
+  start must only ever happen with no runner of this kind alive, or a same-named successor would
+  "heal" an orphan. The single-runner-per-host assumption carries that.
+- M11f: **a wedge while idle is visible at GitHub (≤ 64 s) but nothing ends the pair.** `docker wait`
+  doesn't return on a paused proxy (M5), the runner keeps retrying (M11d), and health is deliberately
+  not a demolition trigger. So an idle wedge pages and stays wedged until a human, or the runner's
+  unmeasured retry budget, ends it. **Open question for this strike:** should `run_job` end the pair
+  when GitHub itself reports the runner offline for longer than G? That would be a counterparty
+  signal, not the proxy's own accept path, so it is not Tesla's probe-starvation hazard.
+
+**Interaction with `run-sandbox.sh`'s failure counter, and the nonce (new live evidence,
+2026-11-03, from the #49 cutover).** `~/.arena-sandbox.fails` reached **5** in a 2026-08-19 burst
+of empty registration-token mints. Only a **clean job** resets it, and sandbox jobs are rare
+(Nick-authored issues take the privileged path), so it stayed at 5 for 2.5 months. On 2026-11-03
+a **graceful `docker stop` of an idle runner**, done to refresh its spend nonce after `arena-auth`
+was recreated, was charged as **failure #6**: `job failed (6 consecutive) — backing off 300s`
+(verified: the file reads `6`, and the log shows `5 → 160s` then much later `6 → 300s` with no
+reset). This is `concept_supervision_backoff_design_tension`'s stateful-counter fork, with a live
+instance of the counter's state outliving its meaning. The recast multiplies the exits that hit it:
+- **The sidecar gate must be infra, not job.** Proxy creation and the health gate run *before* the
+  registration token is minted, so their failures must take the existing infra path (exit 1, no
+  `FAIL_STATE` charge, no mint). The counter exists to cap the token-mint rate, and these mint
+  nothing.
+- **Pair teardown on proxy death must not charge it either.** When `run_job`'s `docker wait <proxy>`
+  ends the pair (M11d), `docker run` returns non-zero, and today's code calls that a job failure.
+  `run_oneshot`'s re-probe can't tell, because the proxy is already gone with the pair. So `run_job`
+  needs a distinct return code ("pair ended because the proxy died") that `run_oneshot` treats as
+  infra. An operator or autopull stop of an *idle* runner is the same case (today's 300 s, above).
+- **The fork must be decided, not inherited.** With "only a clean job resets" and a counter already
+  at the cap, every non-clean exit under the recast waits 300 s before the next pair, so each proxy
+  death becomes a 5-minute outage. Two options: (a) **reset on successful registration** (runner
+  observed online, the same counterparty signal as the off-box check) and charge only "token minted
+  → never registered", which is the producer the counter exists to cap; or (b) **go stateless**:
+  drop the file and rely on launchd's 10 s throttle, accepting ≤ 6 mints/min on a deterministic
+  registration failure. (a) keeps a state file under `set -e` (the class that regressed twice);
+  (b) deletes it.
+- **The nonce coupling survives the recast unchanged.** `run_job` mints the `arena-auth` nonce at
+  *registration* (`run-sandbox.sh:170`, before `docker run` at `:186`), so an idle runner holds a
+  nonce for its whole idle life, and any `arena-auth` recreate invalidates it. The recast doesn't
+  move the mint point (the sidecar adds ~2–10 s before registration), so the chain "recreate
+  `arena-auth` → stale idle nonce → stop the runner to refresh → charged as a failure" is still
+  there. Removing the producer means minting lazily at job start, which is #35
+  (https://github.com/daemon-engine-labs/the-building-repo/issues/35). Until then, the infra
+  return code above at least stops the refresh-stop from being charged.
+
 **The six class members (plus the facts and flaws from the strike) under the recast:**
 
 | Member | Under the sidecar | Status |
@@ -311,14 +383,21 @@ per-job registration-gate cost.
   end the pair (to measure: does the Actions runner exit, or retry forever?).
 
 **Claims to falsify in the re-strike:**
-1. The Actions runner's GitHub long-poll goes through `HTTPS_PROXY` for its whole idle life (so its
-   online status really crosses the wall). Measure idle for hours through a sidecar proxy.
-2. When the proxy dies while the runner is idle, the runner shows **offline** at GitHub within
-   minutes, rather than reconnecting through a recreated proxy without anyone noticing.
+1. ~~The runner's long-poll goes through `HTTPS_PROXY` for its whole idle life~~: **measured at the
+   minutes scale (M11b)**. Not measured over hours.
+2. ~~When the proxy dies while the runner is idle, it shows offline within minutes~~: **measured,
+   ≤ 33 s on death and ≤ 64 s on a wedge (M11c, M11f)**. But M11e shows a recreated proxy heals the
+   old runner silently, so "nothing recreates the proxy mid-life" is now load-bearing.
 3. `rm -fv egress` at `run_job` start can never hit a proxy another live client uses (single
-   sandbox runner per host, enforced by one launchd label).
+   sandbox runner per host, enforced by one launchd label). M11e raises the stakes: a violation
+   wouldn't just break a client, it would silently heal an orphan.
 4. A GitHub-hosted scheduled workflow can read the runner list with a token that has no
    repo-write capability.
+5. **New:** every way the pair can end has a defined `FAIL_STATE` classification (gate failure,
+   proxy death, idle stop, job failure, clean job), and the counter fork is decided. See "Interaction
+   with `run-sandbox.sh`'s failure counter" above.
+6. **New:** an idle wedge ends somehow. Today nothing ends it (M11f), so either accept "page and a
+   human ends it", or add an end trigger that doesn't share the proxy's accept path.
 
 **Open variables (Nick's):** the paging channel (non-public: a private repo issue, or a push
 service through a workflow secret), the check period and the offline grace T, and whether
