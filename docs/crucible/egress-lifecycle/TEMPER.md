@@ -2,8 +2,8 @@
 
 ## ROUND 2 — re-strike of the sidecar RECAST  ⏳ STRIKE IN PROGRESS
 
-**Overall verdict:** _pending — 2 of 4 families returned_
-**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, Carnot, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
+**Overall verdict:** _pending — 3 of 4 families returned_
+**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, Carnot, Noether, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
 
 <!-- Each section below was written when that family returned, before the others finished. Arrival order, NOT a ranking. The synthesis replaces this header; if it never runs, what is here is still real. -->
 
@@ -63,6 +63,47 @@ Hans Gruber: "When you steal $600, you can just disappear. When you steal 600 mi
 - Write the monitor's observation, duration, scheduling, escalation, and self-failure contract. Treat the M11 timings as measurements, not guaranteed maxima.
 - Choose the counter policy now. If retained, scope it solely to minted-but-never-registered attempts and retire the stale state; otherwise explicitly accept the stateless mint-rate limit.
 - Choose and document the idle-wedge policy, then validate SIGKILL orphaning, rapid repeated pair failures, delayed monitoring, and every teardown classification.
+
+### NoetherNullPointer's Design Strike
+
+**Verdict:** RECAST
+
+**Summary:** The sidecar coupling conserves the proxy↔runner pair on clean exits, but the design silently conserves the singleton `egress` name, so the invariant “one proxy ↔ one runner” is not conserved under a second runner, a SIGKILL orphan, or a recreated same-named proxy.
+
+**Producer first:**  
+The bad outcome is still “wall down, or wrong, and nobody knows.” The long-lived design’s producers were P1–P5: docker metadata as health, unwritten desired state, destroy-then-create, launchd silence, and network-existence-as-internal. The sidecar deletes P1/P2/P3 by coupling the proxy to the runner and creating from the current deploy tree. P5 cannot be deleted: a root-equivalent docker-socket actor can replace `arena-internal`, so `Internal == true` must remain an assert-and-refuse residual. The checks that remain are the deny-canary `HEALTHCHECK` (proxy serves and default-deny is in force), the `Internal == true` assert (network has no hole), the off-box runner-online check (counterparty sees the wall), `docker wait` teardown (runner does not retry forever), and the FAIL_STATE classification (infra failures are not charged as job failures). The producers that are still ours and removable are: the singleton `egress` coupling, the orphan runner left by SIGKILL, the idle-wedge pair with no end trigger, and the undecided FAIL_STATE fork. Those are the strikes below.
+
+**Fatal flaws:**
+
+- **Singleton `egress` is a broken invariant.** The design keeps one proxy name and assumes “single sandbox runner per host” (“New risks”). That assumption is not enforced. `docker rm -fv egress` at `run_job` start (“Shape” step 1) can remove the route of a live runner if a second `run_job`, a manual invocation, or a launchd overlap occurs. M11e then shows a recreated same-named proxy silently heals the orphan runner. The pair’s “lives and dies together” symmetry is not conserved. **Class:** unstated assumption / coupling that should be removed rather than guarded.
+
+- **SIGKILL orphan cleanup removes only the proxy.** “New risks: Orphans on SIGKILL” claims `rm -fv egress` covers it. It does not: the orphan runner container survives, and with the singleton name the next proxy heals it (M11e). The off-box check sees an online runner and stays quiet. The invariant “one runner” is broken. **Class:** missing failure mode / under-counted blast radius.
+
+- **Idle wedge has no end trigger.** M11f and “New risks” show a paused proxy while idle is visible at GitHub, but nothing ends the pair. `docker wait` does not return on a paused proxy (M5), the runner retries rather than exits (M11d), and health is deliberately not a demolition trigger. The design leaves this as an open question and claim 6 says it must end somehow. It does not. **Class:** missing failure mode / producer left in place.
+
+- **FAIL_STATE fork is undecided.** “Interaction with `run-sandbox.sh`’s failure counter” says the fork must be decided, lists options (a) and (b), and decides neither. Claim 5 then asserts every exit has a defined classification and the fork is decided. It is not. Every proxy death can become a 300 s backoff. **Class:** unresolved design fork / under-counted blast radius.
+
+- **The off-box check has no dead-man’s switch.** The long-lived design had section F. The recast deletes it. A scheduled GitHub workflow can be disabled, fail, or lose its token; its silence is indistinguishable from “all quiet.” This reintroduces P4 at the meta-level. **Class:** reintroduced silent-success defect.
+
+- **The check observes runner online, not wall correctness.** “Visibility comes from the counterparty” pages on “no online sandbox runner.” M11e proves a runner can be online through a proxy that is not its original pair. Registration proves only the control-plane route; it does not prove the allowlist is correct for job traffic. The recast deleted the spec label and allowlist watcher, so a wrong allowlist that still admits GitHub can stay silent until a job needs the missing host. **Class:** check not the right shape for the stated “wrong route” harm / overclaim.
+
+**What holds:**
+
+- The sidecar frame is right: coupling the proxy’s lifetime to the runner deletes the long-lived proxy’s silent reuse, swap, and reconcile hazards.
+- Health as a creation gate, never a demolition trigger, avoids Tesla’s probe-starvation hazard.
+- M11 is solid evidence that GitHub runner status crosses the wall and reports death (≤33 s) and wedge (≤64 s).
+- The `Internal == true` assert is an honest residual: a root-equivalent docker-socket holder can replace the network, and no arena-level check can stop that.
+- Removing create-beside, alias/rename, spec label, and the box-side watcher simplifies the design.
+
+**If RECAST, what to fold back:**
+
+- Make the proxy name unique per pair: `egress-<runner-id>` or `egress-<uuid>`. Set the runner’s `HTTPS_PROXY` to that name. Remove both containers by a shared label `arena.pair=<id>` on teardown. This deletes the single-runner assumption, the `rm -fv egress` collision, and M11e’s silent heal.
+- Reap orphan pairs by label at `run_job` start, not just the proxy: remove any `arena.pair` containers whose runner is gone or whose proxy is gone. If unique names are used, orphans cannot interfere.
+- Add a counterparty end trigger for idle wedge: while the runner container is running, poll GitHub runner status; if it is offline for > G, end the pair (remove both). This uses the counterparty signal, not the proxy’s accept path, so it is not the probe-starvation hazard. Then `docker wait` is not the only teardown.
+- Decide the FAIL_STATE fork in DESIGN.md. Prefer the stateless option (b): drop `~/.arena-sandbox.fails`, rely on launchd’s 10 s throttle, and classify all pre-mint gate failures and pair-ended-by-proxy-death as infra. If (a) is kept, define the exact reset condition and the distinct return code.
+- Add a dead-man’s switch for the off-box check: have the scheduled workflow write a heartbeat to a pinned issue or private repo, and a second off-box monitor page if the heartbeat is stale. Or use an external cron-monitor.
+- Narrow the “wrong route” claim or add a job-level allow canary: registration proves the control-plane route, not the full allowlist. Either state that wrong allowlist is detected by job failure, or add a lightweight post-registration probe of a representative job endpoint, reported but not used to recreate.
+- Move the nonce mint to job start if #35 is in scope; otherwise explicitly fold in the infra return code so an operator’s refresh-stop of an idle runner is not charged as a job failure.
 
 ---
 
