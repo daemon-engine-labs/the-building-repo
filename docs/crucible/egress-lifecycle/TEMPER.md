@@ -2,8 +2,8 @@
 
 ## ROUND 2 — re-strike of the sidecar RECAST  ⏳ STRIKE IN PROGRESS
 
-**Overall verdict:** _pending — 3 of 4 families returned_
-**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, Carnot, Noether, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
+**Overall verdict:** _pending — 4 of 4 families returned; synthesis next_
+**Struck:** dt-egress45-r2 (2026-11-03) · landed: Maxwell, Carnot, Noether, Tesla, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
 
 <!-- Each section below was written when that family returned, before the others finished. Arrival order, NOT a ranking. The synthesis replaces this header; if it never runs, what is here is still real. -->
 
@@ -104,6 +104,43 @@ The bad outcome is still “wall down, or wrong, and nobody knows.” The long-l
 - Add a dead-man’s switch for the off-box check: have the scheduled workflow write a heartbeat to a pinned issue or private repo, and a second off-box monitor page if the heartbeat is stale. Or use an external cron-monitor.
 - Narrow the “wrong route” claim or add a job-level allow canary: registration proves the control-plane route, not the full allowlist. Either state that wrong allowlist is detected by job failure, or add a lightweight post-registration probe of a representative job endpoint, reported but not used to recreate.
 - Move the nonce mint to job start if #35 is in scope; otherwise explicitly fold in the infra return code so an operator’s refresh-stop of an idle runner is not charged as a job failure.
+
+### Tesla, the Arc-Prophet's Design Strike
+
+Tesla: "If you want the secrets of the universe, think in energy, frequency and vibration."
+
+**Verdict:** RECAST
+
+**Summary:** The sidecar is still a long-lived oscillator tuned to the idle residency, and the stable name `egress` is the frequency at which a survivor runner phase-locks back to life inside the grace window, so GitHub stays green while the pair is a lie.
+
+**Producer first:** Five checks, five producers.
+
+- **Silent heal, GitHub green, the offline blip erased.** The bad outcome is a survivor runner back online through a proxy it was never given, so the off-box check reads "wall fine". The trigger is SIGKILL (`kickstart -k`, the path autopull already drives). The producer is ours: a stable dial target `egress`, republished by the next `run_job`'s `rm -fv` + create, which M11e measured as a heal in ≤ 32 s. One launchd label serializes scripts and does not own containers. M11d shows the runner keeps running after the proxy is gone. **Make the heal impossible: give each incarnation a dial target no survivor holds, and reap leftover runner containers before any proxy is created. Then "never recreate mid-life", "one launchd label", and "rm is safe because the client does not exist yet" become unnecessary.** That last sentence is already false on M11d in this same doc.
+- **A wrong wall that still reaches GitHub, for as long as the runner sits idle.** The bad outcome is default-deny gone, or a hole in `arena-internal`, while the sandbox looks online. The birth HEALTHCHECK and the registration CONNECT sample the filter once. The continuous check samples a different tone: runner online. Jobs are rare (the fail counter sat at 5 for 2.5 months). The proxy's real period is that idle age. M11b is 240 s. **Make unbounded wrongness impossible by making the proxy's life the job's life (raise the pair when work arrives, destroy it when the job ends). A birth sample then covers the whole life, and a continuous deny watcher is unnecessary.** Keeping a resident idle runner leaves this producer in place. A new watcher is the unread log, one octave higher.
+- **An idle wedge that never ends.** The bad outcome is a paused proxy, a runner offline at GitHub, and a pair that sits there until a human (M11f, M5). The trigger is a parser wedge. The producer is ours: teardown listens only to process exit, and a wedge is not an exit. **This producer cannot be deleted.** Something that does not die needs a killer. Do not add the open-question killer ("GitHub reports offline for longer than G"). Offline is produced by wall ∧ GitHub ∧ runner, so a GitHub blip demolishes a healthy pair and, mid-job, the job. If a killer is added, it may read docker pause/health only while the runner is idle.
+- **`Internal == true` before mint.** The bad outcome is an open network treated as a wall. The producer is any holder of the docker socket, which is root-equivalent. **Cannot be removed.** The arena does not own the daemon. The check stays, and on a multi-day idle it is a sample whose authority ends at the next socket call.
+- **Every proxy death becomes a 300 s outage, and a muted pager brings back "nobody knows".** The fail-file producer is a counter that only a clean job resets, already at 6, so the infra exits this recast multiplies are charged as job failures. **Delete the file.** Launchd's 10 s throttle already caps mint rate. Reset-on-registration keeps the file, which is the `set -e` class that regressed twice. Separately, the off-box check pages on every tick with no online `sandbox` runner. On a `gui/$UID` colima host, sleep, lid-close, and a colima pause produce that same predicate. **Remove the equivalence between "runner absent" and "wall failed".** A pager that cries on every sleep gets muted, and a muted pager is the 31,136-line log.
+
+**Fatal flaws:**
+- Make silent heal impossible: stop publishing a proxy under a name a survivor is already dialing, and reap leftover runner containers before creating one. Shape step 1 says `docker rm -fv egress` is safe because the only client does not exist yet. M11d says the runner does not exit. M11e says a same-named successor has it back online in ≤ 32 s, which erases the blip the off-box check exists to see. Autopull's reap of the proxy is the heal, driven at autopull's own period, and it is the path where `run_job`'s `docker wait` never runs (SIGKILL skips cleanup). Claim 3's launchd label does not make this unproduceable. Three guards, one name, and the name is the coupling.
+- The thesis period is wrong, so seven long-lived-frame flaws are still in the circuit. "Created and destroyed around one job" describes a GitHub job. What actually lives is a resident runner between rare jobs, holding a proxy, a nonce, and a frozen policy for that whole idle age (`Interaction with run-sandbox.sh's failure counter`, new risks, M11b "not measured over hours"). Death, wedge, and fail-open are sampled on the idle period. The off-box check hears only silence on the GitHub tone. It cannot hear a wall that fails open and keeps the long-poll. Merged-is-not-live is bounded by autopull only when relaunch does not heal the old runner through the new proxy.
+- Answering the wedge question with a GitHub-offline demolition adds a producer. M11c and M11f show GitHub sees death (≤ 33 s) and wedge (≤ 64 s). That composite also goes quiet when GitHub, the broker, or the host sleeps. A killer on that signal shares a path with the counterparty. Health stays a birth gate. The wedge still needs an ending, and process-exit cannot be that ending.
+- The detection bound is the check period plus ~1 min only for outages that outlast recovery. A heal in ≤ 32 s (M11e) finishes inside any honest grace T (the open variable next to a 300 s backoff). The check pages the deaths that stay dead. The design's own next start is the thing that makes them not stay dead, whenever an orphan runner remains.
+- The fail-counter fork is left open while the recast multiplies the exits that hit a counter already at the cap. Until the file is gone, each proxy death is a five-minute outage, and the 2026-11-03 nonce-refresh stop (failure #6, 300 s) remains the ordinary case.
+
+**What holds:**
+- Fresh create from the current tree, health as a birth gate, registration as the allow-path proof at t=0, and deletion of the swap, the spec label, the egress LaunchAgent, and the box-side watcher. Those were properties of the singleton. M8's alias dance stays buried.
+- M11a–c and M11f: at the minutes scale, a long-poll through the proxy is real, and GitHub's runner status really does see a dead proxy and a wedged one. The reader is off the box. That part of the old watcher is dissolved.
+- Refusing to demolish on the HEALTHCHECK during a job keeps probe starvation disarmed. M3's deny canary is upstream-independent. M10's ~2 s birth cost is cheap.
+- Classifying gate failure, proxy death, and idle stop as infra is the right cut. `arena-auth` staying long-lived because it holds nonce state across jobs is a true reason, and the right place for the round-1 fold-backs.
+- P5 stays a residual with a real reason: the socket is root-equivalent.
+
+**If RECAST, what to fold back:**
+- Rewrite the RECAST thesis in `DESIGN.md`. The proxy is a sidecar of a resident registration, and sandbox jobs are the rare transient. Either scale the pair from zero for the job and tear it down when the job ends (the birth HEALTHCHECK then covers the whole life, and "no online runner" stops being the alarm), or keep the resident runner and stop claiming the long-lived frame was dissolved.
+- Delete the stable dial name `egress`. Each `run_job` publishes a new identity and points `HTTPS_PROXY` only there. At start, reap leftover sandbox runner containers first, then any leftover proxy. State in the autopull paragraph that reaping the proxy while a runner container survives is the M11e heal.
+- Close the open question in the doc: do not end the pair because GitHub reports the runner offline. A wedge ends, if it must end unattended, by an idle-only read of docker pause/health, never during `busy`, never from the runner list.
+- Decide the counter in the doc: drop `~/.arena-sandbox.fails` and let launchd's 10 s throttle cap mints. Specify the distinct `run_job` return for "proxy died" as infra. Leave the nonce mint at registration as the #35 coupling (https://github.com/daemon-engine-labs/the-building-repo/issues/35), explicitly still live.
+- Retune the off-box check. "Runner offline" means the long-poll stopped. On this host it is also sleep and colima. Page that predicate only as runner-absent, and write down that it does not prove the filter. Keep M11b's hours-scale long-poll as an unmeasured, load-bearing claim. 240 s is not the idle orbit.
 
 ---
 
