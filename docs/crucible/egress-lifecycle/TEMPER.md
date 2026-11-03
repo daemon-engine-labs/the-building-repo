@@ -2,8 +2,8 @@
 
 ## ROUND 2 — re-strike of the sidecar RECAST  ⏳ STRIKE IN PROGRESS
 
-**Overall verdict:** _pending — 1 of 4 families returned_
-**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
+**Overall verdict:** _pending — 2 of 4 families returned_
+**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, Carnot, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
 
 <!-- Each section below was written when that family returned, before the others finished. Arrival order, NOT a ranking. The synthesis replaces this header; if it never runs, what is here is still real. -->
 
@@ -34,6 +34,35 @@
 - M11 → add **M11g: the runner's retry budget under a 30-minute outage**, and make the idle-wedge end trigger conditional on it.
 
 Hans Gruber: "When you steal $600, you can just disappear. When you steal 600 million, they will find you." Kill a runner the quiet way and its container finds the next proxy on its own.
+
+### CarnotCodeCarver's Design Strike
+
+**Verdict:** RECAST
+
+**Summary:** The sidecar frame deletes substantial machinery, but ownership and observability remain incomplete. M11 proves useful failure signals, not the promised lifecycle or detection bounds. No real engine matches the Carnot cycle; a reviewer's job is to say how far short we are.
+
+**Producer first:** Bad outcome: jobs lose their route, use a replacement route unintentionally, or repeatedly fail while monitoring reports normal service. External triggers include proxy crashes, wedges, and supervisor SIGKILL. Our producers are the shared `egress` identity across generations, teardown that can outlive its owning supervisor, and monitoring that reduces failure history to sampled runner availability. Delete shared route ownership through per-pair isolation; report pair failures as events rather than trying to reconstruct them from availability. Network isolation assertions must remain because this design does not own the Docker daemon. Startup probes must remain because creating a process cannot establish that it serves correctly.
+
+**Fatal flaws:**
+- Make cross-generation route destruction and silent healing impossible: give each pair its own proxy identity and private internal network, and address teardown and waits by immutable container IDs; then startup's destructive singleton cleanup and the assumption that no old client exists become unnecessary. One launchd label serializes supervisors, not surviving Docker containers. The design explicitly admits SIGKILL orphans, yet uses supervisor uniqueness to justify `rm -fv egress`. M11e demonstrates the consequence: a successor can heal an orphan. Autopull's proposed reap does not specify ordering or cover every supervisor death.
+- Sampled availability cannot detect the silent relaunch loop claimed deleted. A proxy can die, terminate its runner, and recover between scheduled observations. Alternatively, each outage can remain shorter than T indefinitely. Every check sees an online runner while jobs repeatedly fail. M11's measured offline transitions do not establish that an observer will see them; rapid recovery increases this observational entropy.
+- The advertised detection bound lacks an executable monitoring contract. A stateless runner-list read cannot establish 'offline for longer than T' without a duration source, repeated observation, or retained history. Schedule period alone also establishes no maximum execution delay. Define runner identity, treatment of normal between-job gaps, duration measurement, checker failure detection, and notification delivery before claiming a bound.
+- The failure-counter fork remains undecided even though the document supplies evidence that the inherited behavior causes five-minute outages. Infra classification alone does not settle whether stale counter state delays the next pair, when registration succeeds, or how post-registration job failures affect token-mint protection. These alternatives have different availability and mint-rate behavior; they are part of the design, not implementation details.
+- The wedge recovery policy is contradictory. M11f establishes an indefinitely surviving offline pair, while the class table calls wedged reuse dissolved and the risk section still suggests measuring whether the runner retries forever. Paging can satisfy 'somebody knows,' but only after the notification contract exists. Either explicitly accept human recovery with a defined escalation path, or specify automated pair termination. Do not present an unresolved recovery decision as a deleted failure mode.
+
+**What holds:**
+- Matching proxy lifetime to runner lifetime removes the long-lived reconcile, replacement, drift-label, and watcher machinery. Dijkstra: "Simplicity is prerequisite for reliability."
+- M11 provides direct evidence that idle runner connectivity crosses the proxy and that proxy death and pause become visible at GitHub in the tested conditions.
+- M11d correctly makes proxy-exit supervision mandatory: runner retry behavior does not provide pair teardown.
+- Using health only for admission avoids destroying an active pair solely because a shared accept queue starves a probe.
+- Keeping arena-auth separate is justified by its persistent spend state.
+
+**If RECAST, what to fold back:**
+- Keep the sidecar architecture; make each pair an isolated ownership unit with unique routing and immutable teardown targets. Specify orphan reclamation separately from starting a new pair.
+- Separate current availability from failure history. Publish pair-ending failures through an acknowledged event path; retain off-box runner observation to detect host or reporter loss. State the remaining blind spot when both disappear together.
+- Write the monitor's observation, duration, scheduling, escalation, and self-failure contract. Treat the M11 timings as measurements, not guaranteed maxima.
+- Choose the counter policy now. If retained, scope it solely to minted-but-never-registered attempts and retire the stale state; otherwise explicitly accept the stateless mint-rate limit.
+- Choose and document the idle-wedge policy, then validate SIGKILL orphaning, rapid repeated pair failures, delayed monitoring, and every teardown classification.
 
 ---
 
