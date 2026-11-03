@@ -1,5 +1,45 @@
 # TEMPER.md — Egress wall lifecycle (#45)
 
+## ROUND 2 — re-strike of the sidecar RECAST  ⏳ STRIKE IN PROGRESS
+
+**Overall verdict:** _pending — 1 of 4 families returned_
+**Struck:** dt-egress45-r2 (2026-11-03) · landed so far: Maxwell, in arrival order. Candidate: the "RECAST — the proxy is a sidecar" section of DESIGN.md, with M11 measured (`a5a875c`).
+
+<!-- Each section below was written when that family returned, before the others finished. Arrival order, NOT a ranking. The synthesis replaces this header; if it never runs, what is here is still real. -->
+
+### MaxwellMergeSlam's Design Strike
+
+**Verdict:** RECAST
+
+**Summary:** The sidecar frame survives its own measurement (M11: GitHub sees a dead wall in ≤ 33 s and a wedged one in ≤ 64 s), but it rests on two unstated assumptions: that one launchd label means one runner *container*, and that "runner offline" means "the wall is down". It also inherits a failure counter that is measured stale.
+
+**Producer first:** The checks the recast keeps are the creation-time health gate (deny canary), the `Internal == true` assertion, and the off-box "no online sandbox runner" page. (1) The health gate's harm is "a runner registered behind a proxy that doesn't filter". Its producer is creating a proxy we haven't observed, and it can't be removed (a fresh container is unobserved by definition), so the gate is honest, and it is creation-only, which keeps it off the probe-starvation path. (2) `Internal == true`'s producer is a shared docker object that any socket holder can replace, so it can't be removed (see member 6). (3) The page's harm is "the wall is down and nobody knows". Its producer was a box-side signal nobody read, and the recast already removed that by reading GitHub's counterparty-written status (M11 proves the status crosses the wall). **One producer the recast doesn't remove and could:** the orphan runner. A SIGKILLed `run-sandbox.sh` leaves its runner *container* alive and registered. M11e proves that container silently heals onto the next same-named proxy. That turns "one supervisor" into "two registered runners on one wall", and it can be made impossible (see flaw 1), not just detected.
+
+**Fatal flaws:**
+- **Unstated assumption: "single sandbox runner per host, enforced by one launchd label" (claim 3).** launchd enforces one *process* per label, not one *container*. `kickstart -k` (autopull's relaunch) and any SIGKILL skip `run_job`'s teardown, and the `docker run` client dies while the runner container keeps running, still registered. The next `run_job` does `rm -fv egress` and raises a fresh `egress`, and by **M11e** the orphan reconnects through it **by itself within ~30 s**. You now have two registered sandbox runners behind one proxy, one of which no supervisor owns. Autopull de-registers before kickstart, which narrows its own case, but OOM kills, manual kickstarts and installer reaps don't. *Class: unstated assumption plus a coupling to remove.* **Fold:** `run_job`'s start sweep must reap **runner containers first** (label `arena-runner=sandbox`, de-register via the API, verify 404), *then* `rm -fv` the proxy. Better still, name the pair by one id (`egress-<id>`, with the runner's `HTTPS_PROXY` pointing at it) so a successor proxy can never answer an orphan.
+- **Wrong signal frame for the pager: "no online sandbox runner" pages for host-down too.** The same GitHub status reads offline when the Mac sleeps, colima stops, the network drops, or GitHub's broker has an incident, and "pages on every run, no edge detection" turns each of those into a page per period. That is Tesla's round-1 "unread log moved onto a phone" again, one level up: the pager trains Nick to ignore it, so the wall goes silent again. *Class: missing failure mode / under-counted blast radius of the alarm.* **Fold: page on the DIFFERENCE, not the absence.** The privileged runner on the same host has direct egress, not through the wall, so **"privileged online AND sandbox offline for > T"** localises the fault to the wall/sandbox path and stays quiet when the whole host is down (when GitHub visibly queues jobs anyway). It's still two counterparty-written signals, still stateless, still off-box.
+- **The counter fork is load-bearing and still undecided.** The design lists (a) reset-on-registration and (b) stateless, but under the sidecar every proxy death, idle stop and gate hiccup is an exit, and with the counter measured stale (stuck at 5 for 2.5 months, charged by a graceful stop to #6 → 300 s), leaving it open means the first build inherits a 5-minute outage per proxy death. *Class: unstated assumption (that the counter's state means something).* **Fold: decide (b), stateless**, unless a measured GitHub limit argues otherwise. The counter exists to cap registration-token mints. launchd's 10 s throttle already caps that at ≤ 360/h, inside the API's primary limit. A state file under `set -e` is the class that regressed twice and is now measured lying. If (a) is chosen instead, its reset signal must be "runner observed online", never "clean job".
+- **The idle-wedge end is an open question resting on an unmeasured number.** M11d shows the runner retrying ("4 attempts left"), but nobody measured whether it *gives up*. If it exits after a bounded broker-retry budget, a wedged idle pair ends by itself (the runner exits → `run_job` returns → teardown) and the open question **dissolves**. If it retries forever, the design needs an end trigger. *Class: missing measurement under a claimed failure mode.* **Fold:** measure it before choosing (kill or pause a throwaway proxy for 30 min and watch the runner container). Only add a "GitHub-reported offline > G" end trigger if the runner never exits.
+
+**What holds:**
+- The frame: coupling the proxy's lifetime to its only client's. M11 converts the recast's two key claims from belief into measurement, and with them most of round 1's machinery (watcher, spec label, swap, reconcile) stays deleted.
+- Creation-only health gating, with no demolition on health. M11f strengthens it: a wedge is visible at GitHub without the proxy's own accept path being the judge.
+- `docker wait <proxy>` → end the pair is now correctly load-bearing (M11d: the runner won't end it).
+- The FAIL_STATE classification rule (gate failure and proxy-death teardown are infra, never charged) is right and should be built regardless of how the fork is decided.
+
+**If RECAST, what to fold back:**
+- Claim 3 → replace "one launchd label" with the **start sweep: reap and de-register runner containers, then the proxy**, or per-pair names. Add the M11e orphan-heal path to the risks.
+- Shape 5 → the page condition is **`privileged online ∧ sandbox offline > T`**, with the reason.
+- The counter section → **decide (b) stateless** (or (a) with the reset on observed-online), and delete the other.
+- M11 → add **M11g: the runner's retry budget under a 30-minute outage**, and make the idle-wedge end trigger conditional on it.
+
+Hans Gruber: "When you steal $600, you can just disappear. When you steal 600 million, they will find you." Kill a runner the quiet way and its container finds the next proxy on its own.
+
+---
+
+## ROUND 1 — dt-egress45 (2026-10-31): the long-lived candidate
+
+
 **Overall verdict:** RECAST
 **Struck:** dt-egress45 (2026-10-31). Families seated: Maxwell + Noether + Carnot + Tesla (4/4; Wu disabled). Every seat ran at the configured effort (Noether high, Carnot medium, Tesla medium).
 
