@@ -302,7 +302,8 @@ below is an upper bound with 10 s granularity. Afterwards it was de-registered (
 | M11d | …the runner process | **does not exit.** It retries the broker with backoff (`Socket Error: TryAgain`, "4 attempts left"), and the container is still `running` at +33 s and through the next phase. So the runner will never end the pair by itself; something else has to. |
 | M11e | The same-named proxy is **restarted** | the *old* runner is **back online in ≤ 32 s by itself**. A recreated proxy silently heals the old runner. |
 | M11f | Proxy **wedged** (`docker pause`, a freezer like SIGSTOP) while idle | GitHub shows the runner **offline in ≤ 64 s**. On unpause it's online again at the first poll. |
-| — | Not measured | how long the runner keeps retrying before it gives up (if it ever does); idle behaviour over hours |
+| M11g | Proxy **wedged and left wedged** (`docker pause`, 25 min), measured during the round-2 strike | GitHub offline at **+78 s**; the runner container is **still running at +1506 s**, with 100 retry lines and no give-up. **The runner never ends a wedged pair by itself.** |
+| — | Not measured | idle behaviour over *hours* (M11b covered 240 s) |
 
 **What M11 changes in the recast.**
 - Claims 1 and 2 hold at the minutes scale. **GitHub's runner status really does see the wall**,
@@ -466,8 +467,25 @@ refresh-stop is no longer charged because nothing is charged.
 - **Stated blind spot:** GitHub Actions scheduling *and* the box failing together page nothing.
 - Still Nick's: the channel (non-public), the period P, T and k.
 
-### F4. Idle wedge: how it ends
-_(filled from M11g below)_
+### F4. Idle wedge: how it ends (decided by M11g)
+**M11g:** a runner behind a proxy that stays wedged **never gives up** (still running after 25 min;
+GitHub offline from +78 s). `docker wait` doesn't return on a paused proxy (M5). So a wedged idle pair
+lasts forever unless something ends it, and "measure first" (Maxwell) has now answered "something
+must". The two proposed triggers conflict, and **Tesla's constraint wins:**
+- **Rejected: end the pair when GitHub reports the runner offline for > G** (Noether). Offline is
+  produced by wall ∧ GitHub ∧ runner, so a broker incident would demolish *every* healthy pair, and
+  mid-job it would kill the job. That would add a producer.
+- **Adopted: an idle-only local trigger.** `run_job` ends the pair when **both** hold: the proxy's
+  own HEALTHCHECK has been `unhealthy` for ≥ N consecutive checks (M4: a wedge reads unhealthy), and
+  the runner is **idle**, decided **locally** as "no `Runner.Worker` process in the runner container"
+  (host-side `docker top`, no exec). Never during a job (so no probe-starvation hazard), and never
+  from GitHub's runner list. The end is ordered: de-register the runner by name (verify 404), remove
+  the runner container, remove the proxy, then return the infra code, which emits an F3 event.
+- **A mid-job wedge** waits for the job to end (GitHub cancels it at the job timeout). The runner
+  then has no Worker, and the idle rule ends the pair. That is bounded by the job timeout, and it
+  is visible through GitHub's job failure.
+- **Unmeasured, for round 3:** that "no `Runner.Worker`" is a reliable local idle signal, and how
+  the runner behaves after a cancelled job while its proxy is wedged.
 
 ### F5. The thesis period, stated honestly (Tesla; Carnot)
 The pair is scoped to a **runner registration**, not to a job. A sandbox runner idles for long
@@ -501,7 +519,7 @@ That's a frame decision for Nick, not something to fold silently.
 | 1. Silent relaunch loop | Deleted with F2 (no backoff state) + F3 (events + differential page) |
 | 2. Postcondition passes a dead proxy | Deleted (birth gate + registration) |
 | 3. Remove before create | Dissolved; F1 makes it hold under SIGKILL too |
-| 4. Wedge reused / never ends | See F4 |
+| 4. Wedge reused / never ends | Dissolved (no reuse). An idle wedge is ended by F4's idle-only local health trigger, decided by M11g. A mid-job wedge ends after the job timeout. |
 | 5. Reuse blind to flags | Dissolved (no reuse, unique pair per start) |
 | 6. `--internal` assumed | Residual check, asserted at every start |
 | M11e silent heal | **Unproduceable** (F1 unique dial name + runners-first sweep) |
